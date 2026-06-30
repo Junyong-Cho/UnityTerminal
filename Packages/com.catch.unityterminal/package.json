@@ -1,0 +1,20 @@
+{
+  "name": "com.catch.unityterminal",
+  "version": "0.0.1",
+  "displayName": "Unity Editor Terminal",
+  "description": "A sleek, interactive terminal window inside Unity Editor supporting PowerShell, CMD, and WSL with ANSI color formatting and dynamic path completion.",
+  "unity": "2020.3",
+  "author": {
+    "name": "Catch"
+  },
+  "category": "Editor Extensions",
+  "keywords": [
+    "terminal",
+    "console",
+    "shell",
+    "powershell",
+    "bash",
+    "wsl",
+    "editor-extension"
+  ]
+}
