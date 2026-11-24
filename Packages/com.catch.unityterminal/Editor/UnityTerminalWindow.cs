@@ -1,10 +1,7 @@
 using System;
 using System.IO;
 using System.Diagnostics;
-using System.Threading;
 using System.Collections.Generic;
-using System.Text;
-using System.Text.RegularExpressions;
 using UnityEngine;
 using UnityEditor;
 
@@ -24,607 +21,136 @@ namespace UnityTerminal
             window.Show();
         }
 
-        public struct TextSpan
-        {
-            public string text;
-            public string color; // Hex color string, e.g. "#FF5555" or null for default
-            public bool bold;
-            public bool italic;
-        }
+        private ShellSession session;
+        private int inputCursorIndex;
+        private int inputSelectIndex;
+        private int pendingSelection = -1;
 
-        public struct LogChunk
-        {
-            public string text;
-            public bool isError;
-        }
-
-        // Process and stream redirection
-        private Process shellProcess;
-        private StreamWriter shellInput;
-        private Thread outputThread;
-        private Thread errorThread;
-        private readonly object logLock = new object();
-        private readonly Queue<LogChunk> outputQueue = new Queue<LogChunk>();
-
-        // Terminal text buffer
-        private readonly List<List<TextSpan>> terminalLines = new List<List<TextSpan>>();
-        private const int MaxLines = 2000;
-
-        // UI State
+        private readonly TerminalBuffer buffer = new TerminalBuffer();
+        private AnsiParser outputParser;
+        private AnsiParser errorParser;
+        private readonly PathCompletion completion = new PathCompletion();
+        private readonly List<string> commandHistory = new List<string>();
         private string currentInput = "";
+        private string currentWorkingDirectory = "";
+        private string shellType = "PowerShell";
+        private enum ShellTypeEnum { PowerShell, CMD, WSL }
+        private int historyIndex = -1;
+        private int fontSize = 12;
         private Vector2 scrollPosition;
         private bool autoScroll = true;
-        private bool scrollToBottomPending = false;
-        private int fontSize = 12;
-        private string shellType = "PowerShell"; // PowerShell or CMD
-        private bool focusInputPending = true; // Start with true to focus on open
-        
-        // Command History
-        private readonly List<string> commandHistory = new List<string>();
-        private int historyIndex = -1;
-
-        // Auto-complete (Tab)
-        private string currentWorkingDirectory = "";
-        private readonly List<string> autocompleteMatches = new List<string>();
-        private int autocompleteIndex = -1;
-        private string originalAutocompleteWord = "";
-        private string inputBeforeAutocompleteWord = "";
-        private bool isAutocompleting = false;
-
-        // ANSI escape code parsing state
-        private string activeColor = null;
-        private bool activeBold = false;
-        private bool activeItalic = false;
-
-        // Styles
+        private bool scrollToBottomPending;
+        private bool focusInputPending = true;
+        private int pendingCaret = -1;
         private GUIStyle terminalStyle;
         private GUIStyle inputStyle;
+        private int measuredVersion = -1;
+        private float measuredWidth;
+        private int measuredFontSize;
+        private float measuredHeight;
 
         private void OnEnable()
         {
-            // Set up events to avoid leaking background processes
-            AssemblyReloadEvents.beforeAssemblyReload += CleanupOnReload;
-            EditorApplication.quitting += CleanupOnQuit;
-
-            // Load saved preferences
+            AssemblyReloadEvents.beforeAssemblyReload += KillShellProcess;
+            EditorApplication.quitting += KillShellProcess;
             shellType = EditorPrefs.GetString("UnityTerminal_ShellType", "PowerShell");
-            fontSize = EditorPrefs.GetInt("UnityTerminal_FontSize", 12);
+            if (!Enum.IsDefined(typeof(ShellTypeEnum), shellType)) shellType = "PowerShell";
+            fontSize = Mathf.Clamp(EditorPrefs.GetInt("UnityTerminal_FontSize", 12), 10, 24);
             autoScroll = EditorPrefs.GetBool("UnityTerminal_AutoScroll", true);
-
-            // Initialize buffer
-            ClearTerminalBuffer();
-
-            // Start shell
+            outputParser = new AnsiParser(buffer);
+            errorParser = new AnsiParser(buffer, true);
             StartShell();
         }
 
         private void OnDisable()
         {
-            AssemblyReloadEvents.beforeAssemblyReload -= CleanupOnReload;
-            EditorApplication.quitting -= CleanupOnQuit;
-
+            AssemblyReloadEvents.beforeAssemblyReload -= KillShellProcess;
+            EditorApplication.quitting -= KillShellProcess;
             KillShellProcess();
-        }
-
-        private void CleanupOnReload()
-        {
-            KillShellProcess();
-        }
-
-        private void CleanupOnQuit()
-        {
-            KillShellProcess();
+            if (terminalStyle != null && terminalStyle.font != null) DestroyImmediate(terminalStyle.font);
+            terminalStyle = null;
+            inputStyle = null;
         }
 
         private void StartShell()
         {
             KillShellProcess();
-
-            lock (logLock)
-            {
-                terminalLines.Clear();
-                terminalLines.Add(new List<TextSpan>());
-                outputQueue.Clear();
-            }
-
-            activeColor = null;
-            activeBold = false;
-            activeItalic = false;
-
-            string executable = "powershell.exe";
-            string arguments = "-NoLogo -NoExit";
-
-            if (shellType == "CMD")
-            {
-                executable = "cmd.exe";
-                arguments = "/K";
-            }
-            else if (shellType == "WSL")
-            {
-                executable = "wsl.exe";
-                arguments = "";
-            }
-
-            string projectPath = Path.GetFullPath(Path.Combine(Application.dataPath, ".."));
-            currentWorkingDirectory = projectPath;
-
-            AppendSystemMessage($"[System] Starting {shellType} session in:\n{projectPath}\n");
-
+            ClearTerminalBuffer();
+            outputParser.Reset();
+            errorParser.Reset();
+            completion.Reset();
+            currentInput = "";
+            historyIndex = -1;
+            pendingCaret = 0;
+            pendingSelection = -1;
+            focusInputPending = true;
+            currentWorkingDirectory = Path.GetFullPath(Path.Combine(Application.dataPath, ".."));
+            AppendSystemMessage($"[System] Starting {shellType} session in:\n{currentWorkingDirectory}\n");
             try
             {
-                ProcessStartInfo startInfo = new ProcessStartInfo
-                {
-                    FileName = executable,
-                    Arguments = arguments,
-                    WorkingDirectory = projectPath,
-                    RedirectStandardInput = true,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                    StandardOutputEncoding = Encoding.UTF8,
-                    StandardErrorEncoding = Encoding.UTF8
-                };
-
-                // Force ANSI colors for child processes (npm, git, dotnet, etc.)
-                startInfo.EnvironmentVariables["FORCE_COLOR"] = "1";
-                startInfo.EnvironmentVariables["CLICOLOR_FORCE"] = "1";
-                startInfo.EnvironmentVariables["TERM"] = "xterm-256color";
-                startInfo.EnvironmentVariables["GIT_CONFIG_PARAMETERS"] = "'color.status=always' 'color.diff=always' 'color.branch=always' 'color.ui=always'";
-
-                shellProcess = new Process();
-                shellProcess.StartInfo = startInfo;
-                shellProcess.Start();
-
-                shellInput = shellProcess.StandardInput;
-                shellInput.AutoFlush = true;
-
-                // Start async reader threads (with isError parameter)
-                outputThread = new Thread(() => ReadStream(shellProcess.StandardOutput, false));
-                outputThread.IsBackground = true;
-                outputThread.Start();
-
-                errorThread = new Thread(() => ReadStream(shellProcess.StandardError, true));
-                errorThread.IsBackground = true;
-                errorThread.Start();
-
-                // Initialization commands inside the shell for UTF-8 encoding support
-                if (shellType == "PowerShell")
-                {
-                    shellInput.WriteLine("[Console]::OutputEncoding = [System.Text.Encoding]::UTF8");
-                }
-                else if (shellType == "CMD")
-                {
-                    shellInput.WriteLine("chcp 65001");
-                }
+                session = ShellSession.Start(shellType, currentWorkingDirectory);
             }
             catch (Exception ex)
             {
-                AppendSystemMessage($"[System Error] Failed to start shell process: {ex.Message}");
+                AppendSystemMessage($"[System Error] Failed to start shell process: {ex.Message}\n");
             }
+            Repaint();
         }
 
         private void KillShellProcess()
         {
-            if (shellProcess != null)
-            {
-                int pid = shellProcess.Id;
-                try
-                {
-                    // Kill process tree on Windows to ensure child processes started inside the shell are also cleaned up
-                    KillProcessTree(pid);
-                }
-                catch (Exception ex)
-                {
-                    UnityEngine.Debug.LogWarning($"[Terminal] Error during process tree cleanup: {ex.Message}");
-                }
-                finally
-                {
-                    shellProcess = null;
-                    shellInput = null;
-                }
-            }
-
-            if (outputThread != null && outputThread.IsAlive)
-            {
-                outputThread.Interrupt();
-                outputThread = null;
-            }
-
-            if (errorThread != null && errorThread.IsAlive)
-            {
-                errorThread.Interrupt();
-                errorThread = null;
-            }
-        }
-
-        private void KillProcessTree(int pid)
-        {
-            try
-            {
-                ProcessStartInfo killStartInfo = new ProcessStartInfo
-                {
-                    FileName = "taskkill",
-                    Arguments = $"/F /T /PID {pid}",
-                    CreateNoWindow = true,
-                    UseShellExecute = false
-                };
-                using (Process killProcess = Process.Start(killStartInfo))
-                {
-                    killProcess.WaitForExit();
-                }
-            }
-            catch (Exception ex)
-            {
-                UnityEngine.Debug.LogError($"[Terminal] Failed to execute taskkill for PID {pid}: {ex.Message}");
-            }
-        }
-
-        private void ReadStream(StreamReader reader, bool isError)
-        {
-            char[] buffer = new char[1024];
-            try
-            {
-                while (shellProcess != null && !shellProcess.HasExited)
-                {
-                    int bytesRead;
-                    try
-                    {
-                        bytesRead = reader.Read(buffer, 0, buffer.Length);
-                    }
-                    catch
-                    {
-                        break; // Stream or thread terminated
-                    }
-
-                    if (bytesRead > 0)
-                    {
-                        string chunk = new string(buffer, 0, bytesRead);
-                        lock (logLock)
-                        {
-                            outputQueue.Enqueue(new LogChunk { text = chunk, isError = isError });
-                        }
-                    }
-                    else
-                    {
-                        Thread.Sleep(15);
-                    }
-                }
-            }
-            catch (ThreadInterruptedException)
-            {
-                // Clean exit when thread is interrupted on window close or reload
-            }
+            ShellSession previous = session;
+            session = null;
+            if (previous == null) return;
+            previous.Dispose();
+            if (previous.CleanupError != null)
+                UnityEngine.Debug.LogWarning("[Terminal] Process cleanup: " + previous.CleanupError);
         }
 
         private void Update()
         {
-            bool hasNewOutput = false;
-            lock (logLock)
+            if (session == null) return;
+            int version = buffer.Version;
+            var timer = Stopwatch.StartNew();
+            int characters = 0;
+            ShellSession.OutputChunk chunk;
+            // Yield to the editor after at most 64 KiB or 6 ms of parsing per update.
+            while (characters < 65536 && timer.ElapsedMilliseconds < 6 && session.TryDequeue(out chunk))
             {
-                while (outputQueue.Count > 0)
-                {
-                    LogChunk chunk = outputQueue.Dequeue();
-                    ProcessRawText(chunk.text, chunk.isError);
-                    hasNewOutput = true;
-                }
+                (chunk.IsError ? errorParser : outputParser).Feed(chunk.Text);
+                characters += chunk.Text.Length;
             }
 
-            if (hasNewOutput)
+            if (version != buffer.Version)
             {
-                if (autoScroll)
-                {
-                    scrollToBottomPending = true;
-                }
-                Repaint();
+                string directory;
+                if (PathCompletion.TryReadWorkingDirectory(buffer.GetLastLineText(), out directory))
+                    currentWorkingDirectory = directory;
             }
 
-            // Detect unexpected process exit
-            if (shellProcess != null && shellProcess.HasExited)
+            int exitCode;
+            if (session.TryGetExitCode(out exitCode))
             {
-                int exitCode = shellProcess.ExitCode;
                 KillShellProcess();
-                AppendSystemMessage($"\n[System] Shell session exited unexpectedly with code {exitCode}.");
+                AppendSystemMessage($"\n[System] Shell session exited with code {exitCode}.\n");
+            }
+            if (version != buffer.Version)
+            {
+                if (autoScroll) scrollToBottomPending = true;
                 Repaint();
-            }
-        }
-
-        private void ProcessRawText(string text, bool isError)
-        {
-            int i = 0;
-            while (i < text.Length)
-            {
-                int escIdx = text.IndexOf("\x1b[", i);
-                if (escIdx == -1)
-                {
-                    AppendPlainText(text.Substring(i), isError);
-                    break;
-                }
-
-                if (escIdx > i)
-                {
-                    AppendPlainText(text.Substring(i, escIdx - i), isError);
-                }
-
-                // Parse ANSI sequence
-                int seqStart = escIdx + 2;
-                int seqEnd = seqStart;
-                while (seqEnd < text.Length && !char.IsLetter(text[seqEnd]))
-                {
-                    seqEnd++;
-                }
-
-                if (seqEnd >= text.Length)
-                {
-                    // Incomplete escape sequence
-                    break;
-                }
-
-                char commandChar = text[seqEnd];
-                string sequence = text.Substring(seqStart, seqEnd - seqStart);
-
-                if (commandChar == 'm')
-                {
-                    // Style attributes
-                    string[] parts = sequence.Split(';');
-                    foreach (string part in parts)
-                    {
-                        if (string.IsNullOrEmpty(part))
-                        {
-                            ApplyAnsiStyle(0); // Treat empty parameter as 0 (Reset)
-                        }
-                        else if (int.TryParse(part, out int code))
-                        {
-                            ApplyAnsiStyle(code);
-                        }
-                    }
-                }
-                else if (commandChar == 'J')
-                {
-                    // Clear screen sequences (e.g. \x1b[2J)
-                    if (sequence == "2" || sequence == "3" || sequence == "")
-                    {
-                        ClearTerminalBuffer();
-                    }
-                }
-
-                i = seqEnd + 1;
-            }
-        }
-
-        private void ApplyAnsiStyle(int code)
-        {
-            switch (code)
-            {
-                case 0: // Reset
-                    activeColor = null;
-                    activeBold = false;
-                    activeItalic = false;
-                    break;
-                case 1: // Bold
-                    activeBold = true;
-                    break;
-                case 3: // Italic
-                    activeItalic = true;
-                    break;
-                
-                // Dark Theme-tuned ANSI colors (VS Code style)
-                case 30: activeColor = "#333333"; break; // Black
-                case 31: activeColor = "#f44747"; break; // Red
-                case 32: activeColor = "#608b4e"; break; // Green
-                case 33: activeColor = "#dcdcaa"; break; // Yellow
-                case 34: activeColor = "#569cd6"; break; // Blue
-                case 35: activeColor = "#c586c0"; break; // Magenta
-                case 36: activeColor = "#4fc1ff"; break; // Cyan
-                case 37: activeColor = "#d4d4d4"; break; // White
-                
-                // Bright variants
-                case 90: activeColor = "#808080"; break; // Gray
-                case 91: activeColor = "#f44747"; break; // Bright Red
-                case 92: activeColor = "#b5cea8"; break; // Bright Green
-                case 93: activeColor = "#dcdcaa"; break; // Bright Yellow
-                case 94: activeColor = "#569cd6"; break; // Bright Blue
-                case 95: activeColor = "#c586c0"; break; // Bright Magenta
-                case 96: activeColor = "#9cdcfe"; break; // Bright Cyan
-                case 97: activeColor = "#ffffff"; break; // Bright White
-                
-                case 39: activeColor = null; break; // Default FG
-            }
-        }
-
-        private void AppendPlainText(string text, bool isError)
-        {
-            if (string.IsNullOrEmpty(text)) return;
-
-            int len = text.Length;
-            int start = 0;
-
-            for (int i = 0; i < len; i++)
-            {
-                char c = text[i];
-                if (c == '\n' || c == '\r')
-                {
-                    // Flush text before control char
-                    if (i > start)
-                    {
-                        AddSpanToLastLine(text.Substring(start, i - start), isError);
-                    }
-
-                    if (c == '\n')
-                    {
-                        lock (logLock)
-                        {
-                            terminalLines.Add(new List<TextSpan>());
-                            if (terminalLines.Count > MaxLines)
-                            {
-                                terminalLines.RemoveAt(0);
-                            }
-                        }
-                    }
-                    else if (c == '\r')
-                    {
-                        // Check if part of \r\n
-                        if (i + 1 < len && text[i + 1] == '\n')
-                        {
-                            // Skip carriage return in \r\n, let \n process next
-                            start = i + 1;
-                            continue;
-                        }
-                        else
-                        {
-                            // Independent \r: Carriage return overwrites the current line
-                            lock (logLock)
-                            {
-                                if (terminalLines.Count > 0)
-                                {
-                                    terminalLines[terminalLines.Count - 1].Clear();
-                                }
-                            }
-                        }
-                    }
-
-                    start = i + 1;
-                }
-            }
-
-            // Flush remaining text
-            if (start < len)
-            {
-                AddSpanToLastLine(text.Substring(start, len - start), isError);
-            }
-
-            UpdateWorkingDirectoryFromLastLine();
-        }
-
-        private void AddSpanToLastLine(string content, bool isError = false)
-        {
-            if (string.IsNullOrEmpty(content)) return;
-
-            lock (logLock)
-            {
-                if (terminalLines.Count == 0)
-                {
-                    terminalLines.Add(new List<TextSpan>());
-                }
-
-                List<TextSpan> lastLine = terminalLines[terminalLines.Count - 1];
-                
-                string spanColor = activeColor;
-                if (isError && spanColor == null)
-                {
-                    spanColor = "#f44747"; // Default red style for errors (VS Code red)
-                }
-
-                lastLine.Add(new TextSpan
-                {
-                    text = content,
-                    color = spanColor,
-                    bold = activeBold,
-                    italic = activeItalic
-                });
-            }
-        }
-
-        private void AppendSystemMessage(string message)
-        {
-            // Split system messages by newlines
-            string[] msgs = message.Split('\n');
-            for (int i = 0; i < msgs.Length; i++)
-            {
-                if (i > 0)
-                {
-                    lock (logLock)
-                    {
-                        terminalLines.Add(new List<TextSpan>());
-                        if (terminalLines.Count > MaxLines)
-                        {
-                            terminalLines.RemoveAt(0);
-                        }
-                    }
-                }
-                
-                if (!string.IsNullOrEmpty(msgs[i]))
-                {
-                    lock (logLock)
-                    {
-                        List<TextSpan> lastLine = terminalLines[terminalLines.Count - 1];
-                        lastLine.Add(new TextSpan
-                        {
-                            text = msgs[i],
-                            color = "#808080", // Grey style for system output
-                            bold = false,
-                            italic = true
-                        });
-                    }
-                }
             }
         }
 
         private void ClearTerminalBuffer()
         {
-            lock (logLock)
-            {
-                terminalLines.Clear();
-                terminalLines.Add(new List<TextSpan>());
-            }
+            buffer.Clear();
+            scrollPosition = Vector2.zero;
+            Repaint();
         }
 
-        private void UpdateWorkingDirectoryFromLastLine()
+        private void AppendSystemMessage(string message)
         {
-            if (terminalLines.Count == 0) return;
-
-            // Compile text of the last line
-            List<TextSpan> lastLineSpans;
-            lock (logLock)
-            {
-                lastLineSpans = new List<TextSpan>(terminalLines[terminalLines.Count - 1]);
-            }
-
-            StringBuilder sb = new StringBuilder();
-            foreach (var span in lastLineSpans)
-            {
-                sb.Append(span.text);
-            }
-            string lastLineText = sb.ToString().Trim();
-
-            // Match PowerShell prompt: PS C:\Path>
-            Match psMatch = Regex.Match(lastLineText, @"^PS\s+([a-zA-Z]:\\[^>]*)(?:>|\s*>)");
-            if (psMatch.Success)
-            {
-                string path = psMatch.Groups[1].Value.Trim();
-                if (Directory.Exists(path))
-                {
-                    currentWorkingDirectory = path;
-                }
-                return;
-            }
-
-            // Match CMD prompt: C:\Path>
-            Match cmdMatch = Regex.Match(lastLineText, @"^([a-zA-Z]:\\[^>]*)(?:>|\s*>)");
-            if (cmdMatch.Success)
-            {
-                string path = cmdMatch.Groups[1].Value.Trim();
-                if (Directory.Exists(path))
-                {
-                    currentWorkingDirectory = path;
-                }
-                return;
-            }
-
-            // Match WSL prompt: username@computername:/mnt/c/path$ or /mnt/c/path$
-            // Regex matches: /mnt/ followed by drive letter (e.g. c) followed by subpath, ending with $ or #
-            Match wslMatch = Regex.Match(lastLineText, @"/mnt/([a-zA-Z])(/[^$#]*)(?:\$|#|\s*\$|\s*#)");
-            if (wslMatch.Success)
-            {
-                string drive = wslMatch.Groups[1].Value.ToUpper();
-                string path = wslMatch.Groups[2].Value.Replace('/', Path.DirectorySeparatorChar).Trim();
-                string WindowsPath = drive + ":" + path;
-                if (Directory.Exists(WindowsPath))
-                {
-                    currentWorkingDirectory = WindowsPath;
-                }
-                return;
-            }
+            buffer.Append(message, new TerminalStyle { Color = "#808080", Italic = true });
         }
 
         private void InitStyles()
@@ -666,7 +192,9 @@ namespace UnityTerminal
                 if (terminalStyle.font != null)
                 {
                     // Re-create font with size to prevent text blurriness in IMGUI
-                    terminalStyle.font = Font.CreateDynamicFontFromOSFont(terminalStyle.font.name, fontSize);
+                    Font oldFont = terminalStyle.font;
+                    terminalStyle.font = Font.CreateDynamicFontFromOSFont(oldFont.name, fontSize);
+                    DestroyImmediate(oldFont);
                 }
             }
 
@@ -710,9 +238,7 @@ namespace UnityTerminal
         {
             InitStyles();
 
-            // 1. Listen to Keyboard events BEFORE drawing controls to intercept them
-            HandleKeyboardEvents();
-
+            if (Event.current.rawType == EventType.MouseDown) completion.Reset();
             // 2. Draw Toolbar Control Area
             DrawToolbar();
 
@@ -720,18 +246,16 @@ namespace UnityTerminal
             Rect bodyRect = EditorGUILayout.BeginVertical(GUILayout.ExpandWidth(true), GUILayout.ExpandHeight(true));
             EditorGUI.DrawRect(bodyRect, new Color(0.118f, 0.118f, 0.118f));
 
-            // 3. Draw Log Screen
             DrawOutputLog();
-
-            // 4. Draw Terminal Command Input
             DrawInputLine();
-
             EditorGUILayout.EndVertical();
 
             // 5. Refocus input if requested (done at the end of the frame after controls are registered)
             if (focusInputPending)
             {
-                EditorGUI.FocusTextInControl("TerminalInput");
+                // Match the IMGUI TextField below without activating an editor-only text editor.
+                if (GUI.GetNameOfFocusedControl() != "TerminalInput")
+                    GUI.FocusControl("TerminalInput");
                 // Reset flag only during Layout event to ensure the focus manager processes it
                 if (Event.current.type == EventType.Layout)
                 {
@@ -744,18 +268,11 @@ namespace UnityTerminal
         {
             EditorGUILayout.BeginHorizontal(EditorStyles.toolbar);
 
-            // Shell selection
-            ShellTypeEnum currentShellEnum = ShellTypeEnum.PowerShell;
-            if (Enum.TryParse(shellType, out ShellTypeEnum parsedEnum))
+            ShellTypeEnum currentShell = (ShellTypeEnum)Enum.Parse(typeof(ShellTypeEnum), shellType);
+            ShellTypeEnum newShell = (ShellTypeEnum)EditorGUILayout.EnumPopup(currentShell, EditorStyles.toolbarDropDown, GUILayout.Width(100));
+            if (newShell != currentShell)
             {
-                currentShellEnum = parsedEnum;
-            }
-            ShellTypeEnum newShellEnum = (ShellTypeEnum)EditorGUILayout.EnumPopup(currentShellEnum, EditorStyles.toolbarDropDown, GUILayout.Width(100));
-            string newShell = newShellEnum.ToString();
-            
-            if (newShell != shellType)
-            {
-                shellType = newShell;
+                shellType = newShell.ToString();
                 EditorPrefs.SetString("UnityTerminal_ShellType", shellType);
                 StartShell();
             }
@@ -814,97 +331,79 @@ namespace UnityTerminal
 
         private void DrawOutputLog()
         {
-            // Main terminal view area container
             Rect viewRect = EditorGUILayout.BeginVertical(GUILayout.ExpandWidth(true), GUILayout.ExpandHeight(true));
-            
-            // Render Terminal BG Color (#1e1e1e Dark color)
             EditorGUI.DrawRect(viewRect, new Color(0.118f, 0.118f, 0.118f));
-
             scrollPosition = EditorGUILayout.BeginScrollView(scrollPosition, GUILayout.ExpandWidth(true), GUILayout.ExpandHeight(true));
-
-            // Accumulate Rich Text lines
-            StringBuilder sb = new StringBuilder();
-            lock (logLock)
+            string text = buffer.GetRichText();
+            float width = Mathf.Max(1, position.width - 25);
+            if (measuredVersion != buffer.Version || measuredWidth != width || measuredFontSize != fontSize)
             {
-                foreach (var line in terminalLines)
-                {
-                    foreach (var span in line)
-                    {
-                        string open = "";
-                        string close = "";
-                        if (span.bold) { open += "<b>"; close = "</b>" + close; }
-                        if (span.italic) { open += "<i>"; close = "</i>" + close; }
-                        if (span.color != null) { open += $"<color={span.color}>"; close = "</color>" + close; }
-
-                        sb.Append(open).Append(EscapeRichText(span.text)).Append(close);
-                    }
-                    sb.Append("\n");
-                }
+                measuredHeight = terminalStyle.CalcHeight(new GUIContent(text), width);
+                measuredVersion = buffer.Version;
+                measuredWidth = width;
+                measuredFontSize = fontSize;
             }
-
-            string fullText = sb.ToString();
-
-            // Calculate height of rich text logs
-            float viewWidth = position.width - 25;
-            float textHeight = terminalStyle.CalcHeight(new GUIContent(fullText), viewWidth);
-            // Minimum height equal to window to ensure the whole area acts as terminal body
-            float renderHeight = Mathf.Max(textHeight, viewRect.height - 10);
-
-            // Selectable label for rich text rendering & copy paste support
-            EditorGUILayout.SelectableLabel(fullText, terminalStyle, GUILayout.Width(viewWidth), GUILayout.Height(renderHeight));
-
+            float height = Mathf.Max(measuredHeight, viewRect.height - 10);
+            EditorGUILayout.SelectableLabel(text, terminalStyle, GUILayout.Width(width), GUILayout.Height(height));
             if (scrollToBottomPending)
             {
-                scrollPosition.y = renderHeight;
+                scrollPosition.y = height;
                 scrollToBottomPending = false;
             }
-
             EditorGUILayout.EndScrollView();
-
-            // Focus Command input field when terminal background is clicked
             Event e = Event.current;
-            if (viewRect.Contains(e.mousePosition) && e.type == EventType.MouseDown)
+            if (e.type == EventType.MouseDown && viewRect.Contains(e.mousePosition) && GUIUtility.hotControl == 0)
             {
                 focusInputPending = true;
                 Repaint();
             }
-
             EditorGUILayout.EndVertical();
-        }
-
-        private string EscapeRichText(string text)
-        {
-            if (string.IsNullOrEmpty(text)) return "";
-            return text.Replace("<", "&lt;").Replace(">", "&gt;");
         }
 
         private void DrawInputLine()
         {
             EditorGUILayout.BeginHorizontal();
 
-            string promptSymbol = shellType == "PowerShell" ? "PS> " : "> ";
+            string promptSymbol = (shellType == "PowerShell") ? "PS> " : "> ";
             GUILayout.Label(promptSymbol, terminalStyle, GUILayout.Width(30));
 
+            // Let every control register its real geometry and ID before consuming custom keys.
+            // A Used event makes GUILayout return dummy rectangles and may change control IDs.
+            Rect inputRect = GUILayoutUtility.GetRect(new GUIContent(currentInput), inputStyle, GUILayout.ExpandWidth(true));
+            Event inputEvent = Event.current.type == EventType.KeyDown || Event.current.type == EventType.KeyUp
+                ? new Event(Event.current) : null;
+
             GUI.SetNextControlName("TerminalInput");
-            string newInput = EditorGUILayout.TextField(currentInput, inputStyle, GUILayout.ExpandWidth(true));
+            // Use the same IMGUI TextEditor state as completion and caret updates.
+            string newInput = GUI.TextField(inputRect, currentInput, inputStyle);
             
             // Filter out any literal tab characters inserted by Unity's TextField to keep currentInput clean
-            currentInput = newInput.Replace("\t", "");
+            string cleanInput = newInput.Replace("\t", "");
+            if (cleanInput != currentInput) completion.Reset();
+            currentInput = cleanInput;
+            if (inputEvent != null) HandleKeyboardEvents(inputEvent);
+            if (pendingCaret >= 0 && GUI.GetNameOfFocusedControl() == "TerminalInput")
+            {
+                TextEditor editor = (TextEditor)GUIUtility.GetStateObject(typeof(TextEditor), GUIUtility.keyboardControl);
+                editor.text = currentInput;
+                editor.cursorIndex = Mathf.Clamp(pendingCaret, 0, currentInput.Length);
+                editor.selectIndex = pendingSelection < 0 ? editor.cursorIndex : Mathf.Clamp(pendingSelection, 0, currentInput.Length);
+                pendingCaret = -1;
+                pendingSelection = -1;
+            }
+            if (GUI.GetNameOfFocusedControl() == "TerminalInput")
+            {
+                TextEditor editor = (TextEditor)GUIUtility.GetStateObject(typeof(TextEditor), GUIUtility.keyboardControl);
+                inputCursorIndex = editor.cursorIndex;
+                inputSelectIndex = editor.selectIndex;
+            }
 
             EditorGUILayout.EndHorizontal();
         }
 
 
-        private void HandleKeyboardEvents()
+        private void HandleKeyboardEvents(Event e)
         {
-            Event e = Event.current;
-            
-            // Cancel autocomplete if user clicks anywhere with the mouse
-            if (e.type == EventType.MouseDown)
-            {
-                isAutocompleting = false;
-            }
-
             // Only process keyboard input events (prevents Event.Use() error during Layout/Repaint)
             if (e.type != EventType.KeyDown && e.type != EventType.KeyUp)
                 return;
@@ -919,11 +418,11 @@ namespace UnityTerminal
                         e.keyCode != KeyCode.UpArrow && e.keyCode != KeyCode.DownArrow && 
                         e.keyCode != KeyCode.None)
                     {
-                        isAutocompleting = false;
+                        completion.Reset();
                     }
                     else if (e.keyCode == KeyCode.None && e.character != '\0' && e.character != '\t')
                     {
-                        isAutocompleting = false;
+                        completion.Reset();
                     }
                 }
 
@@ -932,15 +431,17 @@ namespace UnityTerminal
                 {
                     if (e.type == EventType.KeyDown)
                     {
-                        if (!string.IsNullOrEmpty(currentInput))
+                        if (!string.IsNullOrEmpty(currentInput) && SendCommand(currentInput))
                         {
-                            SendCommand(currentInput);
                             currentInput = "";
-                            isAutocompleting = false;
+                            pendingCaret = 0;
+                            pendingSelection = -1;
+                            completion.Reset();
                         }
                         focusInputPending = true;
                     }
-                    e.Use(); // Consume both KeyDown and KeyUp to prevent the TextField from submitting/losing focus
+                    Event.current.Use(); // Consume the live event after the input control is registered.
+                    Repaint();
                 }
                 
                 // 2. Up Arrow: History Previous
@@ -954,11 +455,14 @@ namespace UnityTerminal
                             {
                                 historyIndex++;
                                 currentInput = commandHistory[commandHistory.Count - 1 - historyIndex];
-                                isAutocompleting = false;
+                                pendingCaret = currentInput.Length;
+                                pendingSelection = -1;
+                                completion.Reset();
                             }
                         }
                     }
-                    e.Use(); // Consume both KeyDown and KeyUp to prevent caret from moving to start
+                    Event.current.Use();
+                    Repaint();
                 }
                 
                 // 3. Down Arrow: History Next
@@ -976,148 +480,67 @@ namespace UnityTerminal
                             historyIndex = -1;
                             currentInput = "";
                         }
-                        isAutocompleting = false;
+                        completion.Reset();
+                        pendingCaret = currentInput.Length;
+                        pendingSelection = -1;
                     }
-                    e.Use(); // Consume both KeyDown and KeyUp to prevent caret from moving to end
+                    Event.current.Use();
+                    Repaint();
                 }
                 
-                // 4. Tab Key: Smart File System Autocomplete
                 // 4. Tab Key: Smart File System Autocomplete
                 else if (e.keyCode == KeyCode.Tab || e.character == '\t')
                 {
                     if (e.type == EventType.KeyDown)
                     {
                         HandleTabComplete();
-                        focusInputPending = true;
+                        Repaint();
                     }
-                    e.Use(); // Consume both KeyDown and KeyUp to prevent shifting focus to other controls
+                    Event.current.Use(); // Stop Tab navigation after registering the input control.
                 }
             }
         }
-
-        private double lastTabTime = 0;
 
         private void HandleTabComplete()
         {
-            double diff = EditorApplication.timeSinceStartup - lastTabTime;
-            if (diff < 0.05)
+            TextEditor editor = (TextEditor)GUIUtility.GetStateObject(typeof(TextEditor), GUIUtility.keyboardControl);
+            string completed;
+            int caret;
+            if (completion.TryComplete(currentInput, editor.cursorIndex, currentWorkingDirectory, shellType, out completed, out caret))
             {
-                return; // Debounce double triggers in the same frame
-            }
-            lastTabTime = EditorApplication.timeSinceStartup;
-
-            if (string.IsNullOrEmpty(currentInput)) return;
-
-            if (!isAutocompleting)
-            {
-                // Parse word to autocomplete (the last token)
-                int lastSpaceIdx = currentInput.LastIndexOf(' ');
-                string word = lastSpaceIdx == -1 ? currentInput : currentInput.Substring(lastSpaceIdx + 1);
-                string before = lastSpaceIdx == -1 ? "" : currentInput.Substring(0, lastSpaceIdx + 1);
-
-                if (string.IsNullOrEmpty(word)) return;
-
-                string searchDir = currentWorkingDirectory;
-                string searchPattern = word;
-
-                // Handle subfolders inside the path (e.g. Assets/Sc)
-                int lastSlash = word.LastIndexOfAny(new char[] { '/', '\\' });
-                if (lastSlash != -1)
-                {
-                    string subPath = word.Substring(0, lastSlash + 1);
-                    subPath = subPath.Replace('/', Path.DirectorySeparatorChar).Replace('\\', Path.DirectorySeparatorChar);
-                    searchDir = Path.Combine(currentWorkingDirectory, subPath);
-                    searchPattern = word.Substring(lastSlash + 1);
-                }
-
-                autocompleteMatches.Clear();
-
-                if (Directory.Exists(searchDir))
-                {
-                    try
-                    {
-                        string[] entries = Directory.GetFileSystemEntries(searchDir, searchPattern + "*");
-                        foreach (string entry in entries)
-                        {
-                            string name = Path.GetFileName(entry);
-                            if (Directory.Exists(entry))
-                            {
-                                name += "/";
-                            }
-
-                            string completedWord = lastSlash != -1 ? (word.Substring(0, lastSlash + 1) + name) : name;
-                            autocompleteMatches.Add(completedWord);
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        UnityEngine.Debug.LogWarning($"[Terminal] Match search error: {ex.Message}");
-                    }
-                }
-
-                // Initialize tab cycling state
-                if (autocompleteMatches.Count > 0)
-                {
-                    isAutocompleting = true;
-                    autocompleteIndex = 0;
-                    originalAutocompleteWord = word;
-                    inputBeforeAutocompleteWord = before;
-                    currentInput = inputBeforeAutocompleteWord + autocompleteMatches[0];
-                    Repaint();
-                }
-            }
-            else
-            {
-                // Cycle autocomplete choices
-                if (autocompleteMatches.Count > 0)
-                {
-                    autocompleteIndex = (autocompleteIndex + 1) % autocompleteMatches.Count;
-                    currentInput = inputBeforeAutocompleteWord + autocompleteMatches[autocompleteIndex];
-                    Repaint();
-                }
+                currentInput = completed;
+                editor.text = completed;
+                editor.cursorIndex = editor.selectIndex = caret;
+                pendingCaret = caret;
+                pendingSelection = -1;
             }
         }
 
-        private void SendCommand(string cmd)
+        private bool SendCommand(string command)
         {
-            if (shellInput != null && shellProcess != null && !shellProcess.HasExited)
+            string error = "The shell session is not running. Use Restart to start a new session.";
+            if (session == null || !session.TrySend(command, out error))
             {
-                // Update history
-                if (commandHistory.Count == 0 || commandHistory[commandHistory.Count - 1] != cmd)
-                {
-                    commandHistory.Add(cmd);
-                    if (commandHistory.Count > 200)
-                    {
-                        commandHistory.RemoveAt(0);
-                    }
-                }
-                historyIndex = -1;
-
-                // Intercept custom clear screen commands
-                string trimmed = cmd.Trim().ToLower();
-                if (trimmed == "clear" || trimmed == "cls")
-                {
-                    ClearTerminalBuffer();
-                    // Still send to shell to clear underlying terminal buffer if needed
-                }
-
-                // Send to background process (WSL requires only LF (\n), others default to CRLF (\r\n))
-                if (shellType == "WSL")
-                {
-                    shellInput.Write(cmd + "\n");
-                }
-                else
-                {
-                    shellInput.Write(cmd + "\r\n");
-                }
+                AppendSystemMessage("\n[System Error] " + error + "\n");
+                Repaint();
+                return false;
             }
+            AddCommandHistory(command);
+            string trimmed = command.Trim();
+            if (string.Equals(trimmed, "clear", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(trimmed, "cls", StringComparison.OrdinalIgnoreCase)) ClearTerminalBuffer();
+            return true;
         }
 
-        private enum ShellTypeEnum
+        private void AddCommandHistory(string command)
         {
-            PowerShell,
-            CMD,
-            WSL
+            if (commandHistory.Count == 0 || commandHistory[commandHistory.Count - 1] != command)
+            {
+                commandHistory.Add(command);
+                if (commandHistory.Count > 200) commandHistory.RemoveAt(0);
+            }
+            historyIndex = -1;
         }
+
     }
 }
