@@ -1,7 +1,7 @@
 param([switch]$SkipNativeTests, [switch]$CodexSmokeTest)
 $ErrorActionPreference = 'Stop'
 $editorDirectory = Join-Path $PSScriptRoot '../Editor'
-$sources = @('TerminalScreen.cs', 'TerminalInput.cs', 'ConPtySession.cs') | ForEach-Object { Join-Path $editorDirectory $_ }
+$sources = @('TerminalScreen.cs', 'TerminalInput.cs', 'ConPtySession.cs', 'ShellCatalog.cs') | ForEach-Object { Join-Path $editorDirectory $_ }
 $sources += Join-Path $PSScriptRoot 'InteractiveTerminalTests.cs'
 Add-Type -Path $sources -ErrorAction Stop
 $fixture = Join-Path $PSScriptRoot ('NativeFixtures-' + [Guid]::NewGuid().ToString('N'))

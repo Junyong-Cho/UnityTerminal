@@ -49,7 +49,10 @@ namespace UnityTerminal
         private string currentInput = "";
         private string currentWorkingDirectory = "";
         private string shellType = "PowerShell";
-        private enum ShellTypeEnum { PowerShell, CMD, WSL }
+        private ShellOption[] shellOptions;
+        private string[] shellLabels;
+        private int shellCatalogRevision = -1;
+        private bool waitingForShellDiscovery;
         private int historyIndex = -1;
         private int fontSize = 12;
         private Vector2 scrollPosition;
@@ -68,13 +71,17 @@ namespace UnityTerminal
         {
             AssemblyReloadEvents.beforeAssemblyReload += KillShellProcess;
             EditorApplication.quitting += KillShellProcess;
-            shellType = EditorPrefs.GetString("UnityTerminal_ShellType", "PowerShell");
-            if (!Enum.IsDefined(typeof(ShellTypeEnum), shellType)) shellType = "PowerShell";
+            shellType = EditorPrefs.GetString("UnityTerminal_ShellType", "");
+            if (!ShellCatalog.IsKnownShell(shellType)) shellType = "";
             fontSize = Mathf.Clamp(EditorPrefs.GetInt("UnityTerminal_FontSize", 12), 10, 24);
             autoScroll = EditorPrefs.GetBool("UnityTerminal_AutoScroll", true);
             outputParser = new AnsiParser(buffer);
             errorParser = new AnsiParser(buffer, true);
-            StartShell();
+            ShellCatalog.Refresh();
+            RefreshShellOptions();
+            waitingForShellDiscovery = shellType == "" || shellType == "PowerShell7";
+            if (waitingForShellDiscovery) ClearTerminalBuffer();
+            else StartShell();
         }
 
         private void OnDisable()
@@ -136,6 +143,21 @@ namespace UnityTerminal
 
         private void Update()
         {
+            if (shellOptions == null || shellCatalogRevision != ShellCatalog.Revision)
+            {
+                RefreshShellOptions();
+                Repaint();
+            }
+            if (waitingForShellDiscovery)
+            {
+                if (!ShellCatalog.DiscoveryComplete) return;
+                RefreshShellOptions();
+                waitingForShellDiscovery = false;
+                // Save only deliberate menu selections. An automatic fallback must not
+                // prevent a future launch from preferring an installed PowerShell 7.
+                shellType = ShellCatalog.ChooseInitialShell(shellType, shellOptions);
+                StartShell();
+            }
             if (interactiveSession != null)
             {
                 // The primary buffer remains intact behind the interactive screen. Its
@@ -412,8 +434,10 @@ namespace UnityTerminal
             }
             else
             {
+                EditorGUI.BeginDisabledGroup(waitingForShellDiscovery);
                 DrawOutputLog();
                 DrawInputLine();
+                EditorGUI.EndDisabledGroup();
             }
 
             EditorGUILayout.EndVertical();
@@ -438,11 +462,14 @@ namespace UnityTerminal
         {
             EditorGUILayout.BeginHorizontal(EditorStyles.toolbar);
 
-            ShellTypeEnum currentShell = (ShellTypeEnum)Enum.Parse(typeof(ShellTypeEnum), shellType);
-            ShellTypeEnum newShell = (ShellTypeEnum)EditorGUILayout.EnumPopup(currentShell, EditorStyles.toolbarDropDown, GUILayout.Width(100));
+            if (shellOptions == null) RefreshShellOptions();
+            int currentShell = Math.Max(0, Array.FindIndex(shellOptions, option => option.Id == shellType));
+            EditorGUI.BeginDisabledGroup(waitingForShellDiscovery);
+            int newShell = EditorGUILayout.Popup(currentShell, shellLabels, EditorStyles.toolbarDropDown, GUILayout.Width(165));
+            EditorGUI.EndDisabledGroup();
             if (newShell != currentShell)
             {
-                shellType = newShell.ToString();
+                shellType = shellOptions[newShell].Id;
                 EditorPrefs.SetString("UnityTerminal_ShellType", shellType);
                 StartShell();
             }
@@ -498,10 +525,12 @@ namespace UnityTerminal
                 StopInteractive(null);
 
             // Restart Shell
+            EditorGUI.BeginDisabledGroup(waitingForShellDiscovery);
             if (GUILayout.Button("Restart", EditorStyles.toolbarButton, GUILayout.Width(60)))
             {
                 StartShell();
             }
+            EditorGUI.EndDisabledGroup();
 
             EditorGUILayout.EndHorizontal();
         }
@@ -541,7 +570,7 @@ namespace UnityTerminal
         {
             EditorGUILayout.BeginHorizontal();
 
-            string promptSymbol = (shellType == "PowerShell") ? "PS> " : "> ";
+            string promptSymbol = ShellCatalog.IsPowerShell(shellType) ? "PS> " : "> ";
             GUILayout.Label(promptSymbol, terminalStyle, GUILayout.Width(30));
 
             // Let every control register its real geometry and ID before consuming custom keys.
@@ -733,5 +762,10 @@ namespace UnityTerminal
             historyIndex = -1;
         }
 
+        private void RefreshShellOptions()
+        {
+            shellOptions = ShellCatalog.GetOptions(out shellCatalogRevision);
+            shellLabels = Array.ConvertAll(shellOptions, option => option.Label);
+        }
     }
 }

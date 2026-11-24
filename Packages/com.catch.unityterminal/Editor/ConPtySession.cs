@@ -40,7 +40,8 @@ namespace UnityTerminal
             string arguments;
             switch (shellType)
             {
-                case "PowerShell": executable = "powershell.exe"; arguments = "-NoLogo -Command " + QuoteArgument(command); break;
+                case "PowerShell":
+                case "PowerShell7": executable = ShellCatalog.GetExecutable(shellType); arguments = "-NoLogo -Command " + QuoteArgument(command); break;
                 case "CMD": executable = "cmd.exe"; arguments = "/d /s /c \"" + command + "\""; break;
                 case "WSL": executable = "wsl.exe"; arguments = "--cd " + QuoteArgument(directory) + " --exec sh -lc " + QuoteArgument(command); break;
                 default: throw new ArgumentException("Unknown shell: " + shellType);

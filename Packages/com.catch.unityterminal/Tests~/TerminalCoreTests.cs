@@ -27,6 +27,7 @@ namespace UnityTerminal.Tests
             Check("completion uses caret and cycles candidates", () => CaretAndCycling(fixtureDirectory));
             Check("completion escapes shell metacharacters", () => EscapedCompletion(fixtureDirectory));
             Check("prompt directory recognition", () => PromptDirectory(fixtureDirectory));
+            Check("PowerShell 7 is listed only when available", ShellChoices);
             if (includeShellTests && Environment.OSVersion.Platform == PlatformID.Win32NT)
             {
                 Check("failed startup cleans up safely", () => FailedStartup(fixtureDirectory));
@@ -201,7 +202,9 @@ namespace UnityTerminal.Tests
             Assert(completion.TryComplete("cat cash", 8, directory, "PowerShell", out result, out caret), "No PS match");
             Equal("cat 'cash$`'' file.txt'", result);
             completion.Reset();
-
+            Assert(completion.TryComplete("cat cash", 8, directory, "PowerShell7", out result, out caret), "No PowerShell 7 match");
+            Equal("cat 'cash$`'' file.txt'", result);
+            completion.Reset();
             Assert(completion.TryComplete("cat \"cash", 9, directory, "PowerShell", out result, out caret), "No PS double-quoted match");
             Equal("cat \"cash`$``' file.txt\"", result);
             completion.Reset();
@@ -219,6 +222,26 @@ namespace UnityTerminal.Tests
             string wsl = "/mnt/" + char.ToLowerInvariant(directory[0]) + directory.Substring(2).Replace('\\', '/');
             Assert(PathCompletion.TryReadWorkingDirectory("user@host:" + wsl + "$", out actual), "WSL prompt failed");
             Equal(directory, actual);
+        }
+
+        private static void ShellChoices()
+        {
+            ShellOption[] absent = ShellCatalog.BuildOptions(null);
+            Assert(absent.Length == 3 && Array.FindIndex(absent, option => option.Id == "PowerShell7") < 0, "Uninstalled PowerShell 7 was listed");
+            Assert(Array.FindIndex(absent, option => option.Id == "PowerShell" && option.Label == "Windows PowerShell 5.1") >= 0,
+                "The legacy PowerShell preference/label was lost");
+            ShellOption[] present = ShellCatalog.BuildOptions("pwsh.exe");
+            Assert(present.Length == 4 && Array.FindIndex(present, option => option.Id == "PowerShell7" && option.Label == "PowerShell 7") >= 0,
+                "Installed PowerShell 7 is not selectable");
+            Assert(ShellCatalog.IsPowerShell("PowerShell") && ShellCatalog.IsPowerShell("PowerShell7") && !ShellCatalog.IsPowerShell("CMD"), "PowerShell versions use different input semantics");
+            Equal("powershell.exe", ShellCatalog.GetExecutable("PowerShell"));
+            Equal("PowerShell7", ShellCatalog.ChooseInitialShell(null, present));
+            Equal("PowerShell7", ShellCatalog.ChooseInitialShell("", present));
+            Equal("PowerShell", ShellCatalog.ChooseInitialShell(null, absent));
+            Equal("PowerShell", ShellCatalog.ChooseInitialShell("PowerShell7", absent));
+            Equal("PowerShell", ShellCatalog.ChooseInitialShell("PowerShell", present));
+            Equal("CMD", ShellCatalog.ChooseInitialShell("CMD", present));
+            Equal("WSL", ShellCatalog.ChooseInitialShell("WSL", present));
         }
 
         private static void FailedStartup(string directory)

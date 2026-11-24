@@ -1,7 +1,7 @@
 param([switch]$SkipShellTests)
 $ErrorActionPreference = 'Stop'
 $editorDirectory = Join-Path $PSScriptRoot '../Editor'
-$sources = @('TerminalBuffer.cs', 'AnsiParser.cs', 'PathCompletion.cs', 'ShellSession.cs') |
+$sources = @('TerminalBuffer.cs', 'AnsiParser.cs', 'PathCompletion.cs', 'ShellSession.cs', 'ShellCatalog.cs') |
     ForEach-Object { Join-Path $editorDirectory $_ }
 $sources += Join-Path $PSScriptRoot 'TerminalCoreTests.cs'
 Add-Type -Path $sources -ErrorAction Stop

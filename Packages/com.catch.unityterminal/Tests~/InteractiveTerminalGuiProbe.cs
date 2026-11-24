@@ -36,11 +36,14 @@ namespace UnityTerminal.Tests
         private static void Requested()
         {
             if (AssetDatabase.IsAssetImportWorkerProcess() || !File.Exists("Temp/RunInteractiveGuiProbe")) return;
+            requestedShell = File.ReadAllText("Temp/RunInteractiveGuiProbe").Trim() == "PowerShell7" ? "PowerShell7" : "PowerShell";
             File.Delete("Temp/RunInteractiveGuiProbe");
+            WindowType.Assembly.GetType("UnityTerminal.ShellCatalog").GetMethod("Refresh").Invoke(null, null);
             EditorApplication.update += StartProbe;
         }
         private static void StartProbe()
         {
+            if (!(bool)WindowType.Assembly.GetType("UnityTerminal.ShellCatalog").GetProperty("DiscoveryComplete").GetValue(null, null)) return;
             EditorApplication.update -= StartProbe;
             try
             {
@@ -154,6 +157,9 @@ namespace UnityTerminal.Tests
                             return;
                         }
                         if (EditorApplication.timeSinceStartup - primaryStableSince < 0.25) return;
+                        var labels = (string[])Get("shellLabels");
+                        Require(Array.IndexOf(labels, "Windows PowerShell 5.1") >= 0, "The version 5.1 selector is missing");
+                        if (requestedShell == "PowerShell7") Require(Array.IndexOf(labels, "PowerShell 7") >= 0, "Installed PowerShell 7 is missing from the selector");
                         trace.AppendLine("PASS: shell selector and primary session use " + requestedShell);
                         CapturePrimary();
                         bool started = (bool)WindowType.GetMethod("SendCommand", Private).Invoke(this, new object[] { "codex --no-daemon --sandbox read-only" });

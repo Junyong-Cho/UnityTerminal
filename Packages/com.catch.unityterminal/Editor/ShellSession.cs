@@ -43,7 +43,8 @@ namespace UnityTerminal
             switch (shellType)
             {
                 case "PowerShell":
-                    executable = "powershell.exe";
+                case "PowerShell7":
+                    executable = ShellCatalog.GetExecutable(shellType);
                     // Configure stdin before PowerShell starts reading redirected commands.
                     arguments = "-NoLogo -NoExit -Command \"[Console]::InputEncoding = [System.Text.Encoding]::UTF8; " +
                         "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; $OutputEncoding = [Console]::OutputEncoding\"";

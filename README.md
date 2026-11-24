@@ -4,6 +4,7 @@
 
 Unity Package Manager의 **Add package from git URL**에 위 주소를 입력하고, **Window → Terminal**에서 엽니다. 현재 셸 실행은 Windows의 PowerShell, CMD, WSL을 지원합니다.
 
+셸 메뉴에서 **Windows PowerShell 5.1**과 **PowerShell 7**을 구분해 선택할 수 있습니다. 창을 열 때 PowerShell 7을 확인하며, 실제로 실행 가능한 7 버전이 있을 때만 선택지가 표시됩니다. 저장된 선택이 없으면 **7을 우선 사용하고, 없으면 5.1로 시작**합니다. 직접 선택한 셸은 유지하며, 저장된 7 버전을 찾지 못하면 해당 실행에서는 5.1로 복귀합니다. 일반 명령과 Codex 실행 모두 선택한 버전을 사용합니다. 설치 상태가 바뀌면 터미널 창을 다시 열어 갱신합니다.
 
 Codex CLI가 설치되어 선택한 셸에서 실행 가능하다면, 기존 명령 입력란에 `codex`를 입력합니다. 같은 창이 대화형 화면으로 전환되고 종료 후 원래 명령 입력란으로 돌아옵니다. `codex resume`, `codex login`, `codex --help`도 같은 방식으로 실행합니다. 로그인과 승인은 Codex 화면에서 직접 진행합니다. 대화형 실행에는 Windows 10 1809 이상이 필요합니다.
 
@@ -19,6 +20,7 @@ Codex가 C# 코드를 수정하는 중에 세션이 끊기지 않도록, 대화�
 | --- | --- |
 | `UnityTerminalWindow.cs` | Unity 창, 입력, 히스토리, 설정, 프레임별 출력 처리 |
 | `ShellSession.cs` | 셸 프로세스, UTF-8 입출력, 세션별 출력 큐, 프로세스 트리 종료 |
+| `ShellCatalog.cs` | 셸 선택 목록, PowerShell 7 비동기 탐색과 버전 확인, 공통 실행 파일 결정 |
 | `TerminalBuffer.cs` | 출력 줄과 스타일 저장, 버퍼 제한, Rich Text 캐시 |
 | `AnsiParser.cs` | 스트림별 ANSI 상태 유지, 색상과 스타일, CRLF 청크 분할 처리 |
 | `PathCompletion.cs` | 커서 위치와 따옴표를 고려한 경로 완성, 프롬프트 경로 인식 |
@@ -49,5 +51,6 @@ powershell -NoProfile -ExecutionPolicy Bypass -File ./Packages/com.catch.unityte
 
 실제 Unity 창의 Codex 회귀 검사는 `Tests~/InteractiveTerminalGuiProbe.cs`를 `Assets/Editor`에 복사하고 `Temp/RunInteractiveGuiProbe` 파일을 만든 뒤 **Assets → Refresh**를 실행합니다. 결과는 `Temp/InteractiveGuiProbe.result.txt`에 저장합니다. 읽기 전용 Codex 프롬프트에 문자열을 입력하지만 제출하지 않습니다. `Stop`과 자연 종료 후 기존 셸·로그·스크롤·입력 상태 복원, Enter로 실행한 명령의 소비도 검사합니다. 검사 후 복사한 스크립트를 삭제합니다.
 
+PowerShell 7이 설치된 환경에서는 `Tests~/Run-ShellSelectionTests.ps1`로 5.1과 7의 일반/ConPTY 실행 및 한글 입출력을 검사합니다. Unity의 Codex 회귀 검사도 7로 실행하려면 `Temp/RunInteractiveGuiProbe` 파일 내용에 `PowerShell7`을 기록합니다.
 
 대화형 명령은 현재 폴더에서 별도 셸 프로세스로 실행하므로, 일반 입력 모드 셸에서 정의한 임시 변수·함수는 전달되지 않습니다. 대화형 자동 전환 대상은 `codex` 명령입니다. 다른 명령은 기존 표준 스트림 모드를 사용합니다. WSL 경로 완성은 Windows에서 접근 가능한 `/mnt/<드라이브>/...` 경로를 기준으로 하며, 일반 입력 모드의 현재 경로 추적은 기본 프롬프트 형식에 의존합니다.

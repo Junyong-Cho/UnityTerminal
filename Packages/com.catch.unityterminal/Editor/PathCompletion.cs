@@ -28,6 +28,7 @@ namespace UnityTerminal
         public bool TryComplete(string input, int caret, string workingDirectory, string shellType,
             out string completed, out int completedCaret)
         {
+            if (ShellCatalog.IsPowerShell(shellType)) shellType = "PowerShell";
             completed = input;
             completedCaret = caret;
             caret = Math.Max(0, Math.Min(caret, input.Length));
