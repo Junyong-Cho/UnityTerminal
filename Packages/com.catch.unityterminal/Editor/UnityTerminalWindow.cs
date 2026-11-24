@@ -22,10 +22,25 @@ namespace UnityTerminal
         }
 
         private ShellSession session;
+        private ConPtySession interactiveSession;
+        private TerminalScreen interactiveScreen;
+        private InteractiveTerminalView interactiveView;
+        private int interactiveBlink;
+        private bool interactiveReloadLocked;
+        private PrimaryViewState primaryViewState;
+        private bool preservePrimaryViewport;
+        private string interactiveStatus;
         private int inputCursorIndex;
         private int inputSelectIndex;
         private int pendingSelection = -1;
 
+        private sealed class PrimaryViewState
+        {
+            public string Input;
+            public int Cursor, Selection, HistoryIndex;
+            public Vector2 Scroll;
+            public bool ScrollPending;
+        }
         private readonly TerminalBuffer buffer = new TerminalBuffer();
         private AnsiParser outputParser;
         private AnsiParser errorParser;
@@ -83,6 +98,8 @@ namespace UnityTerminal
             historyIndex = -1;
             pendingCaret = 0;
             pendingSelection = -1;
+            preservePrimaryViewport = false;
+            interactiveStatus = null;
             focusInputPending = true;
             currentWorkingDirectory = Path.GetFullPath(Path.Combine(Application.dataPath, ".."));
             AppendSystemMessage($"[System] Starting {shellType} session in:\n{currentWorkingDirectory}\n");
@@ -99,6 +116,16 @@ namespace UnityTerminal
 
         private void KillShellProcess()
         {
+            if (interactiveSession != null)
+            {
+                interactiveSession.Dispose();
+                interactiveSession = null;
+                interactiveScreen = null;
+                interactiveView = null;
+                EditorGUIUtility.editingTextField = false;
+            }
+            UnlockInteractiveReload();
+            primaryViewState = null;
             ShellSession previous = session;
             session = null;
             if (previous == null) return;
@@ -109,6 +136,13 @@ namespace UnityTerminal
 
         private void Update()
         {
+            if (interactiveSession != null)
+            {
+                // The primary buffer remains intact behind the interactive screen. Its
+                // bounded output queue retains any background output until we return.
+                UpdateInteractive();
+                return;
+            }
             if (session == null) return;
             int version = buffer.Version;
             var timer = Stopwatch.StartNew();
@@ -136,7 +170,7 @@ namespace UnityTerminal
             }
             if (version != buffer.Version)
             {
-                if (autoScroll) scrollToBottomPending = true;
+                if (autoScroll && !preservePrimaryViewport) scrollToBottomPending = true;
                 Repaint();
             }
         }
@@ -151,6 +185,126 @@ namespace UnityTerminal
         private void AppendSystemMessage(string message)
         {
             buffer.Append(message, new TerminalStyle { Color = "#808080", Italic = true });
+        }
+
+        private bool StartInteractive(string command)
+        {
+            if (interactiveSession != null) return false;
+            try
+            {
+                var saved = new PrimaryViewState
+                {
+                    Input = currentInput,
+                    Cursor = Mathf.Clamp(inputCursorIndex, 0, currentInput.Length),
+                    Selection = Mathf.Clamp(inputSelectIndex, 0, currentInput.Length),
+                    HistoryIndex = historyIndex,
+                    Scroll = scrollPosition,
+                    ScrollPending = scrollToBottomPending
+                };
+                // Agent edits must not unload the managed pipe readers mid-session.
+                EditorApplication.LockReloadAssemblies();
+                interactiveReloadLocked = true;
+                int columns = Mathf.Clamp((int)((position.width - 8) / Mathf.Max(1, terminalStyle.CalcSize(new GUIContent("M")).x)), 2, 500);
+                int rows = Mathf.Clamp((int)((position.height - 50) / Mathf.Max(fontSize + 3, terminalStyle.lineHeight)), 2, 300);
+                var started = ConPtySession.Start(shellType, command, currentWorkingDirectory, columns, rows);
+                interactiveSession = started;
+                primaryViewState = saved;
+                interactiveStatus = null;
+                interactiveScreen = new TerminalScreen(columns, rows);
+                interactiveScreen.Reply = SendInteractive;
+                interactiveView = new InteractiveTerminalView(interactiveScreen)
+                {
+                    Send = SendInteractive,
+                    Resize = (width, height) =>
+                    {
+                        try { if (interactiveSession != null) interactiveSession.Resize(width, height); }
+                        catch (Exception ex) { interactiveView.ShowError("Resize: " + ex.Message); }
+                    }
+                };
+                completion.Reset();
+                Repaint();
+                return true;
+            }
+            catch (Exception ex)
+            {
+                if (interactiveSession != null) interactiveSession.Dispose();
+                interactiveSession = null;
+                interactiveScreen = null;
+                interactiveView = null;
+                primaryViewState = null;
+                UnlockInteractiveReload();
+                AppendSystemMessage("\n[System Error] Unable to start the interactive terminal: " + ex.Message + "\n");
+                Repaint();
+                return false;
+            }
+        }
+
+        private void SendInteractive(string text)
+        {
+            string error;
+            if (interactiveSession != null && !interactiveSession.TrySend(text, out error)) interactiveView.ShowError(error);
+        }
+
+        private void UpdateInteractive()
+        {
+            var timer = Stopwatch.StartNew();
+            int characters = 0;
+            string text;
+            bool changed = false;
+            while (characters < 65536 && timer.ElapsedMilliseconds < 6 && interactiveSession.TryDequeue(out text))
+            {
+                interactiveScreen.Feed(text);
+                characters += text.Length;
+                changed = true;
+            }
+            int code;
+            if (interactiveSession.TryGetExitCode(out code))
+            {
+                StopInteractive(code == 0 ? null : "[System Error] Interactive session exited with code " + code + ".");
+                return;
+            }
+            if (interactiveSession.Failure != null)
+            {
+                StopInteractive("[System Error] " + interactiveSession.Failure);
+                return;
+            }
+            int blink = (int)(EditorApplication.timeSinceStartup * 2);
+            if (changed || blink != interactiveBlink) { interactiveBlink = blink; Repaint(); }
+        }
+
+        private void StopInteractive(string message)
+        {
+            if (interactiveSession == null) return;
+            interactiveSession.Dispose();
+            interactiveSession = null;
+            interactiveView = null;
+            interactiveScreen = null;
+            EditorGUIUtility.editingTextField = false;
+            // Closing the interactive page reveals the primary page; neither the app's
+            // transcript nor a normal exit message belongs in the primary scrollback.
+            interactiveStatus = message != null && message.StartsWith("[System Error]", StringComparison.Ordinal) ? message : null;
+            PrimaryViewState saved = primaryViewState;
+            primaryViewState = null;
+            if (saved != null)
+            {
+                currentInput = saved.Input;
+                historyIndex = saved.HistoryIndex;
+                pendingCaret = saved.Cursor;
+                pendingSelection = saved.Selection;
+                scrollPosition = saved.Scroll;
+                scrollToBottomPending = saved.ScrollPending;
+            }
+            focusInputPending = true;
+            preservePrimaryViewport = true;
+            Repaint();
+            UnlockInteractiveReload();
+        }
+
+        private void UnlockInteractiveReload()
+        {
+            if (!interactiveReloadLocked) return;
+            interactiveReloadLocked = false;
+            EditorApplication.UnlockReloadAssemblies();
         }
 
         private void InitStyles()
@@ -239,6 +393,10 @@ namespace UnityTerminal
             InitStyles();
 
             if (Event.current.rawType == EventType.MouseDown) completion.Reset();
+            if (interactiveSession == null && (Event.current.type == EventType.KeyDown ||
+                Event.current.rawType == EventType.MouseDown || Event.current.type == EventType.ScrollWheel))
+                preservePrimaryViewport = false;
+
             // 2. Draw Toolbar Control Area
             DrawToolbar();
 
@@ -246,12 +404,24 @@ namespace UnityTerminal
             Rect bodyRect = EditorGUILayout.BeginVertical(GUILayout.ExpandWidth(true), GUILayout.ExpandHeight(true));
             EditorGUI.DrawRect(bodyRect, new Color(0.118f, 0.118f, 0.118f));
 
-            DrawOutputLog();
-            DrawInputLine();
+            bool drewInteractive = interactiveSession != null;
+            if (drewInteractive)
+            {
+                Rect rect = GUILayoutUtility.GetRect(0, 10000, 0, 10000, GUILayout.ExpandWidth(true), GUILayout.ExpandHeight(true));
+                interactiveView.Draw(rect, terminalStyle.font, fontSize, focusedWindow == this);
+            }
+            else
+            {
+                DrawOutputLog();
+                DrawInputLine();
+            }
+
             EditorGUILayout.EndVertical();
 
+            if (drewInteractive && interactiveView != null && interactiveView.HandleInput()) Repaint();
+
             // 5. Refocus input if requested (done at the end of the frame after controls are registered)
-            if (focusInputPending)
+            if (focusInputPending && interactiveSession == null)
             {
                 // Match the IMGUI TextField below without activating an editor-only text editor.
                 if (GUI.GetNameOfFocusedControl() != "TerminalInput")
@@ -300,6 +470,9 @@ namespace UnityTerminal
 
             GUILayout.FlexibleSpace();
 
+            if (interactiveStatus != null)
+                GUILayout.Label(new GUIContent("Interactive error", interactiveStatus), EditorStyles.miniLabel);
+
             // Display current folder name (clean UX)
             string displayFolder = "Root";
             if (!string.IsNullOrEmpty(currentWorkingDirectory))
@@ -317,8 +490,12 @@ namespace UnityTerminal
             // Clear Log
             if (GUILayout.Button("Clear", EditorStyles.toolbarButton, GUILayout.Width(50)))
             {
-                ClearTerminalBuffer();
+                if (interactiveSession != null) SendInteractive("\x0c");
+                else ClearTerminalBuffer();
             }
+
+            if (interactiveSession != null && GUILayout.Button("Stop", EditorStyles.toolbarButton, GUILayout.Width(45)))
+                StopInteractive(null);
 
             // Restart Shell
             if (GUILayout.Button("Restart", EditorStyles.toolbarButton, GUILayout.Width(60)))
@@ -518,6 +695,20 @@ namespace UnityTerminal
 
         private bool SendCommand(string command)
         {
+            if (TerminalInput.IsCodexCommand(command))
+            {
+                if (!StartInteractive(command)) return false;
+                AddCommandHistory(command);
+                if (primaryViewState.Input == command)
+                {
+                    // Enter consumed the launch command; return to its now-empty prompt.
+                    primaryViewState.Input = "";
+                    primaryViewState.Cursor = primaryViewState.Selection = 0;
+                    primaryViewState.HistoryIndex = -1;
+                }
+                return true;
+            }
+            interactiveStatus = null;
             string error = "The shell session is not running. Use Restart to start a new session.";
             if (session == null || !session.TrySend(command, out error))
             {
