@@ -33,6 +33,7 @@ namespace UnityTerminal
         private int columns;
         private int rows;
         public string Failure { get; private set; }
+        internal int ProcessId { get; private set; }
 
         public static ConPtySession Start(string shellType, string command, string directory, int columns, int rows)
         {
@@ -42,8 +43,6 @@ namespace UnityTerminal
             {
                 case "PowerShell":
                 case "PowerShell7": executable = ShellCatalog.GetExecutable(shellType); arguments = "-NoLogo -Command " + QuoteArgument(command); break;
-                case "CMD": executable = "cmd.exe"; arguments = "/d /s /c \"" + command + "\""; break;
-                case "WSL": executable = "wsl.exe"; arguments = "--cd " + QuoteArgument(directory) + " --exec sh -lc " + QuoteArgument(command); break;
                 default: throw new ArgumentException("Unknown shell: " + shellType);
             }
             return StartProcess(executable, arguments, directory, columns, rows);
@@ -85,6 +84,7 @@ namespace UnityTerminal
                 Check(CreateProcess(null, new StringBuilder(QuoteArgument(executable) + " " + arguments), IntPtr.Zero, IntPtr.Zero,
                     false, 0x00080000 | 0x00000400 | 0x00000004, environment, Path.GetFullPath(directory), ref startup, out info));
                 session.process = info.Process;
+                session.ProcessId = unchecked((int)info.ProcessId);
                 thread = info.Thread;
                 Check(AssignProcessToJobObject(session.job, session.process));
 
@@ -128,6 +128,7 @@ namespace UnityTerminal
             foreach (DictionaryEntry entry in Environment.GetEnvironmentVariables()) entries[(string)entry.Key] = (string)entry.Value;
             entries["TERM"] = "xterm-256color";
             entries["COLORTERM"] = "truecolor";
+            entries["WSL_UTF8"] = "1";
             var block = new StringBuilder();
             foreach (var entry in entries) block.Append(entry.Key).Append('=').Append(entry.Value).Append('\0');
             block.Append('\0');
@@ -145,6 +146,26 @@ namespace UnityTerminal
                 slashes = 0;
             }
             return result.Append('\\', slashes * 2).Append('"').ToString();
+        }
+
+        // A host-owned job also protects the redirected primary shell if the host crashes.
+        internal static SafeFileHandle ProtectProcessLifetime(int processId)
+        {
+            IntPtr job = CreateJobObject(IntPtr.Zero, null);
+            Check(job != IntPtr.Zero);
+            var lifetime = new SafeFileHandle(job, true);
+            IntPtr target = IntPtr.Zero;
+            try
+            {
+                var limits = new JobLimits(); limits.Basic.LimitFlags = 0x2000;
+                Check(SetInformationJobObject(job, 9, ref limits, (uint)Marshal.SizeOf(typeof(JobLimits))));
+                target = OpenProcess(0x0101, false, (uint)processId);
+                Check(target != IntPtr.Zero);
+                Check(AssignProcessToJobObject(job, target));
+                return lifetime;
+            }
+            catch { lifetime.Dispose(); throw; }
+            finally { if (target != IntPtr.Zero) CloseHandle(target); }
         }
 
         private void ReadOutput()
@@ -251,10 +272,19 @@ namespace UnityTerminal
         {
             if (disposed) return;
             disposed = true;
+            // Closing stdin can end the parent before detached console children exit.
+            // Terminate the live tree before waking the writer that closes that pipe.
+            if (process != IntPtr.Zero && WaitForSingleObject(process, 0) == 258)
+                KillProcessTree(ProcessId, process);
             stopping = true;
             lock (outputLock) { output.Clear(); Monitor.PulseAll(outputLock); }
             lock (inputLock) { input.Clear(); Monitor.PulseAll(inputLock); }
-            if (job != IntPtr.Zero) { CloseHandle(job); job = IntPtr.Zero; }
+            if (job != IntPtr.Zero)
+            {
+                // Terminate explicitly while this job handle is still valid.
+                TerminateJobObject(job, 1);
+                CloseHandle(job); job = IntPtr.Zero;
+            }
             // Also covers startup failure before the process was assigned to its job.
             if (process != IntPtr.Zero) { TerminateProcess(process, 1); CloseHandle(process); process = IntPtr.Zero; }
             BeginCloseConsole();
@@ -262,6 +292,46 @@ namespace UnityTerminal
             if (writerThread == null && writer != null) writer.Dispose();
             // Never close the console on the editor thread: ClosePseudoConsole can block.
             if (closeThread != null) closeThread.Join(250);
+        }
+
+        private static void KillProcessTree(int processId, IntPtr root)
+        {
+            IntPtr snapshot = CreateToolhelp32Snapshot(2, 0);
+            if (snapshot == new IntPtr(-1)) return;
+            try
+            {
+                var children = new Dictionary<uint, List<uint>>();
+                var entry = new ProcessEntry { Size = (uint)Marshal.SizeOf(typeof(ProcessEntry)) };
+                if (Process32First(snapshot, ref entry)) do
+                {
+                    List<uint> list;
+                    if (!children.TryGetValue(entry.Parent, out list)) children[entry.Parent] = list = new List<uint>();
+                    list.Add(entry.Id);
+                } while (Process32Next(snapshot, ref entry));
+                long created, exited, kernel, user;
+                if (GetProcessTimes(root, out created, out exited, out kernel, out user))
+                    KillChildren((uint)processId, created, children, new HashSet<uint>());
+            }
+            finally { CloseHandle(snapshot); }
+        }
+        private static void KillChildren(uint parent, long parentCreated, Dictionary<uint, List<uint>> children, HashSet<uint> visited)
+        {
+            List<uint> list;
+            if (!visited.Add(parent) || !children.TryGetValue(parent, out list)) return;
+            foreach (uint child in list)
+            {
+                IntPtr handle = OpenProcess(0x1001, false, child); // QUERY_LIMITED_INFORMATION | TERMINATE
+                if (handle == IntPtr.Zero) continue;
+                try
+                {
+                    long created, exited, kernel, user;
+                    // Ignore stale parent IDs belonging to an earlier process incarnation.
+                    if (!GetProcessTimes(handle, out created, out exited, out kernel, out user) || created < parentCreated) continue;
+                    KillChildren(child, created, children, visited);
+                    TerminateProcess(handle, 1);
+                }
+                finally { CloseHandle(handle); }
+            }
         }
 
         private static Coord Size(int columns, int rows)
@@ -282,6 +352,15 @@ namespace UnityTerminal
         }
         [StructLayout(LayoutKind.Sequential)] private struct StartupInfoEx { public StartupInfo Startup; public IntPtr Attributes; }
         [StructLayout(LayoutKind.Sequential)] private struct ProcessInfo { public IntPtr Process, Thread; public uint ProcessId, ThreadId; }
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)] private struct ProcessEntry
+        {
+            public uint Size, Usage, Id;
+            public UIntPtr Heap;
+            public uint Module, Threads, Parent;
+            public int Priority;
+            public uint Flags;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string Executable;
+        }
         [StructLayout(LayoutKind.Sequential)] private struct BasicLimits
         {
             public long ProcessTime, JobTime;
@@ -310,10 +389,16 @@ namespace UnityTerminal
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] private static extern IntPtr CreateJobObject(IntPtr attributes, string name);
         [DllImport("kernel32.dll", SetLastError = true)] private static extern bool SetInformationJobObject(IntPtr job, int kind, ref JobLimits information, uint size);
         [DllImport("kernel32.dll", SetLastError = true)] private static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+        [DllImport("kernel32.dll", SetLastError = true)] private static extern bool TerminateJobObject(IntPtr job, uint exitCode);
         [DllImport("kernel32.dll", SetLastError = true)] private static extern uint ResumeThread(IntPtr thread);
         [DllImport("kernel32.dll", SetLastError = true)] private static extern bool GetExitCodeProcess(IntPtr process, out uint code);
         [DllImport("kernel32.dll")] private static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
         [DllImport("kernel32.dll")] private static extern bool TerminateProcess(IntPtr process, uint code);
         [DllImport("kernel32.dll")] private static extern bool CloseHandle(IntPtr handle);
+        [DllImport("kernel32.dll", SetLastError = true)] private static extern IntPtr OpenProcess(uint access, bool inherit, uint processId);
+        [DllImport("kernel32.dll", SetLastError = true)] private static extern IntPtr CreateToolhelp32Snapshot(uint flags, uint processId);
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] private static extern bool Process32First(IntPtr snapshot, ref ProcessEntry entry);
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] private static extern bool Process32Next(IntPtr snapshot, ref ProcessEntry entry);
+        [DllImport("kernel32.dll")] private static extern bool GetProcessTimes(IntPtr process, out long created, out long exited, out long kernel, out long user);
     }
 }

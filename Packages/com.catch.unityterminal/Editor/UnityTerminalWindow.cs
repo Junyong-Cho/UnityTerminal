@@ -724,7 +724,7 @@ namespace UnityTerminal
 
         private bool SendCommand(string command)
         {
-            if (TerminalInput.IsCodexCommand(command))
+            if (TerminalInput.IsCodexCommand(command) || TerminalInput.IsInteractiveWslCommand(command))
             {
                 if (!StartInteractive(command)) return false;
                 AddCommandHistory(command);

@@ -1,5 +1,7 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
+using System.Text;
 using System.Text.RegularExpressions;
 
 namespace UnityTerminal
@@ -19,6 +21,97 @@ namespace UnityTerminal
                 string.Equals(executable, "codex.exe", StringComparison.OrdinalIgnoreCase) ||
                 string.Equals(executable, "codex.cmd", StringComparison.OrdinalIgnoreCase) ||
                 string.Equals(executable, "codex.ps1", StringComparison.OrdinalIgnoreCase);
+        }
+
+        public static bool IsInteractiveWslCommand(string command)
+        {
+            List<string> tokens;
+            if (!TryTokenizeCommand(command, out tokens) || tokens.Count == 0) return false;
+            string executable = tokens[0].Replace('\\', '/');
+            executable = executable.Substring(executable.LastIndexOf('/') + 1);
+            if (!string.Equals(executable, "wsl", StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(executable, "wsl.exe", StringComparison.OrdinalIgnoreCase)) return false;
+
+            for (int i = 1; i < tokens.Count; i++)
+            {
+                string option = tokens[i];
+                if (option == "~" || option == "--system") continue;
+                if (option == "-d" || option == "--distribution" || option == "-u" || option == "--user" ||
+                    option == "--cd" || option == "--shell-type")
+                {
+                    if (++i >= tokens.Count || tokens[i].Length == 0 || tokens[i].StartsWith("-", StringComparison.Ordinal)) return false;
+                    continue;
+                }
+                if (option.StartsWith("--distribution=", StringComparison.Ordinal) || option.StartsWith("--user=", StringComparison.Ordinal) ||
+                    option.StartsWith("--cd=", StringComparison.Ordinal) || option.StartsWith("--shell-type=", StringComparison.Ordinal))
+                {
+                    if (option.EndsWith("=", StringComparison.Ordinal)) return false;
+                    continue;
+                }
+                if (option == "--exec" || option == "-e" || option == "--") i++;
+                return IsInteractiveLinuxCommand(tokens, i);
+            }
+            return true;
+        }
+
+        private static bool IsInteractiveLinuxCommand(List<string> tokens, int start)
+        {
+            if (start >= tokens.Count) return false;
+            string executable = tokens[start];
+            executable = executable.Substring(executable.LastIndexOf('/') + 1);
+            if (executable == "codex") return true;
+            if (executable != "bash" && executable != "sh" && executable != "zsh" && executable != "fish" &&
+                executable != "dash" && executable != "ksh" && executable != "pwsh" && executable != "nu") return false;
+            // A shell with a command argument is a one-shot invocation, not a nested prompt.
+            for (int i = start + 1; i < tokens.Count; i++)
+                if (tokens[i] != "-l" && tokens[i] != "--login" && tokens[i] != "-i" && tokens[i] != "--interactive") return false;
+            return true;
+        }
+
+        private static bool TryTokenizeCommand(string command, out List<string> tokens)
+        {
+            tokens = new List<string>();
+            var token = new StringBuilder();
+            char quote = '\0';
+            bool started = false;
+            command = command.Trim();
+            int start = command.StartsWith("&", StringComparison.Ordinal) ? 1 : 0;
+            for (int i = start; i < command.Length; i++)
+            {
+                char c = command[i];
+                if (c == '`' && quote != '\'')
+                {
+                    if (++i >= command.Length) return false;
+                    token.Append(command[i]); started = true;
+                }
+                else if (quote != '\0')
+                {
+                    if (c == quote)
+                    {
+                        if (quote == '\'' && i + 1 < command.Length && command[i + 1] == '\'') { token.Append(c); i++; }
+                        else quote = '\0';
+                    }
+                    else
+                    {
+                        if (quote == '"' && c == '$') return false; // Leave PowerShell expressions in their original session.
+                        token.Append(c);
+                    }
+                }
+                else if (c == '\'' || c == '"') { quote = c; started = true; }
+                else if (char.IsWhiteSpace(c))
+                {
+                    if (c == '\n' || c == '\r') return false;
+                    if (started) { tokens.Add(token.ToString()); token.Length = 0; started = false; }
+                }
+                else
+                {
+                    if (";|&<>$(){}#".IndexOf(c) >= 0) return false;
+                    token.Append(c); started = true;
+                }
+            }
+            if (quote != '\0') return false;
+            if (started) tokens.Add(token.ToString());
+            return true;
         }
 
         public static string Encode(TerminalKey key, char character, bool shift, bool alt, bool control, bool applicationCursor)

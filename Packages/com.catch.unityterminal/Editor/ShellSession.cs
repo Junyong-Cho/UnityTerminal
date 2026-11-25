@@ -33,10 +33,10 @@ namespace UnityTerminal
 
         public string CleanupError { get; private set; }
 
-        private ShellSession(string shellType, string workingDirectory)
+        private ShellSession(string shellType, string workingDirectory, string executablePath = null)
         {
             if (Environment.OSVersion.Platform != PlatformID.Win32NT)
-                throw new PlatformNotSupportedException("PowerShell, CMD and WSL sessions currently require Windows.");
+                throw new PlatformNotSupportedException("PowerShell sessions currently require Windows.");
 
             string executable;
             string arguments;
@@ -44,16 +44,14 @@ namespace UnityTerminal
             {
                 case "PowerShell":
                 case "PowerShell7":
-                    executable = ShellCatalog.GetExecutable(shellType);
+                    executable = executablePath ?? ShellCatalog.GetExecutable(shellType);
                     // Configure stdin before PowerShell starts reading redirected commands.
                     arguments = "-NoLogo -NoExit -Command \"[Console]::InputEncoding = [System.Text.Encoding]::UTF8; " +
                         "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; $OutputEncoding = [Console]::OutputEncoding\"";
                     break;
-                case "CMD": executable = "cmd.exe"; arguments = "/K chcp 65001"; break;
-                case "WSL": executable = "wsl.exe"; arguments = ""; break;
                 default: throw new ArgumentException("Unknown shell: " + shellType);
             }
-            newline = shellType == "WSL" ? "\n" : "\r\n";
+            newline = "\r\n";
             var startInfo = new ProcessStartInfo
             {
                 FileName = executable,
@@ -70,6 +68,7 @@ namespace UnityTerminal
             startInfo.EnvironmentVariables["FORCE_COLOR"] = "1";
             startInfo.EnvironmentVariables["CLICOLOR_FORCE"] = "1";
             startInfo.EnvironmentVariables["TERM"] = "xterm-256color";
+            startInfo.EnvironmentVariables["WSL_UTF8"] = "1";
             // Preserve any Git configuration supplied by the host environment.
             string gitConfig = startInfo.EnvironmentVariables["GIT_CONFIG_PARAMETERS"];
             startInfo.EnvironmentVariables["GIT_CONFIG_PARAMETERS"] =
@@ -79,7 +78,18 @@ namespace UnityTerminal
 
         public static ShellSession Start(string shellType, string workingDirectory)
         {
-            var session = new ShellSession(shellType, workingDirectory);
+            return StartCore(new ShellSession(shellType, workingDirectory));
+        }
+
+        internal static ShellSession StartExecutable(string executable, string workingDirectory)
+        {
+            return StartCore(new ShellSession("PowerShell", workingDirectory, executable));
+        }
+
+        internal int ProcessId { get { return started && !disposed ? process.Id : 0; } }
+
+        private static ShellSession StartCore(ShellSession session)
+        {
             try
             {
                 session.process.Start();

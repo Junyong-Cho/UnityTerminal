@@ -28,7 +28,7 @@ namespace UnityTerminal
         public static int Revision { get { lock (sync) return revision; } }
 
         public static bool IsPowerShell(string id) { return id == "PowerShell" || id == "PowerShell7"; }
-        public static bool IsKnownShell(string id) { return IsPowerShell(id) || id == "CMD" || id == "WSL"; }
+        public static bool IsKnownShell(string id) { return IsPowerShell(id); }
 
         public static void Refresh()
         {
@@ -76,8 +76,6 @@ namespace UnityTerminal
             var options = new List<ShellOption>();
             if (!string.IsNullOrEmpty(powerShell7Executable)) options.Add(new ShellOption("PowerShell7", "PowerShell 7"));
             options.Add(new ShellOption("PowerShell", "Windows PowerShell 5.1"));
-            options.Add(new ShellOption("CMD", "CMD"));
-            options.Add(new ShellOption("WSL", "WSL"));
             return options.ToArray();
         }
 
@@ -90,8 +88,6 @@ namespace UnityTerminal
         public static string GetExecutable(string id)
         {
             if (id == "PowerShell") return "powershell.exe";
-            if (id == "CMD") return "cmd.exe";
-            if (id == "WSL") return "wsl.exe";
             if (id != "PowerShell7") throw new ArgumentException("Unknown shell: " + id);
             lock (sync)
             {
@@ -104,7 +100,8 @@ namespace UnityTerminal
         {
             if (Environment.OSVersion.Platform != PlatformID.Win32NT) return null;
             // Probe PATH first. Store execution aliases can launch even when File.Exists is false.
-            if (IsVersion7("pwsh.exe")) return "pwsh.exe";
+            string resolved;
+            if (TryResolveVersion7("pwsh.exe", out resolved)) return resolved;
             var candidates = new List<string>();
             AddCandidate(candidates, Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "PowerShell", "7", "pwsh.exe");
             AddCandidate(candidates, Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "PowerShell", "7", "pwsh.exe");
@@ -112,7 +109,7 @@ namespace UnityTerminal
             AddCandidate(candidates, local, "Microsoft", "WindowsApps", "pwsh.exe");
             AddCandidate(candidates, local, "Microsoft", "WindowsApps", "Microsoft.PowerShell_8wekyb3d8bbwe", "pwsh.exe");
             foreach (string candidate in candidates)
-                if (IsVersion7(candidate)) return candidate;
+                if (TryResolveVersion7(candidate, out resolved)) return resolved;
             return null;
         }
 
@@ -126,6 +123,13 @@ namespace UnityTerminal
 
         internal static bool IsVersion7(string executable)
         {
+            string resolved;
+            return TryResolveVersion7(executable, out resolved);
+        }
+
+        private static bool TryResolveVersion7(string executable, out string resolved)
+        {
+            resolved = null;
             try
             {
                 using (var process = new Process())
@@ -133,7 +137,8 @@ namespace UnityTerminal
                     process.StartInfo = new ProcessStartInfo
                     {
                         FileName = executable,
-                        Arguments = "-NoLogo -NoProfile -NonInteractive -Command \"[Console]::Write($PSVersionTable.PSVersion.Major)\"",
+                        Arguments = "-NoLogo -NoProfile -NonInteractive -Command \"[Console]::WriteLine($PSVersionTable.PSVersion.Major); " +
+                            "[Console]::Write([System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName)\"",
                         UseShellExecute = false,
                         CreateNoWindow = true,
                         RedirectStandardOutput = true,
@@ -150,7 +155,13 @@ namespace UnityTerminal
                         process.WaitForExit(500);
                         return false;
                     }
-                    return process.ExitCode == 0 && stdout.Wait(500) && stdout.Result.Trim() == "7";
+                    if (process.ExitCode != 0 || !stdout.Wait(500)) return false;
+                    string[] result = stdout.Result.Trim().Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+                    if (result.Length != 2 || result[0] != "7" || !Path.IsPathRooted(result[1])) return false;
+                    // Store aliases launch a brokered process outside our Windows job.
+                    // Start the runtime's actual executable so lifetime and PID remain ours.
+                    resolved = result[1];
+                    return true;
                 }
             }
             catch (Exception ex)

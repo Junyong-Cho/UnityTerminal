@@ -208,8 +208,6 @@ namespace UnityTerminal.Tests
             Assert(completion.TryComplete("cat \"cash", 9, directory, "PowerShell", out result, out caret), "No PS double-quoted match");
             Equal("cat \"cash`$``' file.txt\"", result);
             completion.Reset();
-            Assert(completion.TryComplete("cat cash", 8, directory, "WSL", out result, out caret), "No WSL match");
-            Equal("cat 'cash$`'\\'' file.txt'", result);
         }
 
         private static void PromptDirectory(string directory)
@@ -217,21 +215,19 @@ namespace UnityTerminal.Tests
             string actual;
             Assert(PathCompletion.TryReadWorkingDirectory("PS " + directory + ">", out actual), "PS prompt failed");
             Equal(directory, actual);
-            Assert(PathCompletion.TryReadWorkingDirectory(directory + ">", out actual), "CMD prompt failed");
+            Assert(PathCompletion.TryReadWorkingDirectory(directory + ">", out actual), "Path-only prompt failed");
             Equal(directory, actual);
-            string wsl = "/mnt/" + char.ToLowerInvariant(directory[0]) + directory.Substring(2).Replace('\\', '/');
-            Assert(PathCompletion.TryReadWorkingDirectory("user@host:" + wsl + "$", out actual), "WSL prompt failed");
-            Equal(directory, actual);
+            Assert(!PathCompletion.TryReadWorkingDirectory("user@host:/mnt/c/work$", out actual), "Linux prompt changed the PowerShell working directory");
         }
 
         private static void ShellChoices()
         {
             ShellOption[] absent = ShellCatalog.BuildOptions(null);
-            Assert(absent.Length == 3 && Array.FindIndex(absent, option => option.Id == "PowerShell7") < 0, "Uninstalled PowerShell 7 was listed");
+            Assert(absent.Length == 1 && Array.FindIndex(absent, option => option.Id == "PowerShell7") < 0, "Uninstalled PowerShell 7 was listed");
             Assert(Array.FindIndex(absent, option => option.Id == "PowerShell" && option.Label == "Windows PowerShell 5.1") >= 0,
                 "The legacy PowerShell preference/label was lost");
             ShellOption[] present = ShellCatalog.BuildOptions("pwsh.exe");
-            Assert(present.Length == 4 && Array.FindIndex(present, option => option.Id == "PowerShell7" && option.Label == "PowerShell 7") >= 0,
+            Assert(present.Length == 2 && Array.FindIndex(present, option => option.Id == "PowerShell7" && option.Label == "PowerShell 7") >= 0,
                 "Installed PowerShell 7 is not selectable");
             Assert(ShellCatalog.IsPowerShell("PowerShell") && ShellCatalog.IsPowerShell("PowerShell7") && !ShellCatalog.IsPowerShell("CMD"), "PowerShell versions use different input semantics");
             Equal("powershell.exe", ShellCatalog.GetExecutable("PowerShell"));
@@ -240,23 +236,26 @@ namespace UnityTerminal.Tests
             Equal("PowerShell", ShellCatalog.ChooseInitialShell(null, absent));
             Equal("PowerShell", ShellCatalog.ChooseInitialShell("PowerShell7", absent));
             Equal("PowerShell", ShellCatalog.ChooseInitialShell("PowerShell", present));
-            Equal("CMD", ShellCatalog.ChooseInitialShell("CMD", present));
-            Equal("WSL", ShellCatalog.ChooseInitialShell("WSL", present));
+            Assert(!ShellCatalog.IsKnownShell("CMD") && !ShellCatalog.IsKnownShell("WSL"), "Removed shells remain selectable");
+            Equal("PowerShell7", ShellCatalog.ChooseInitialShell("CMD", present));
+            Equal("PowerShell7", ShellCatalog.ChooseInitialShell("WSL", present));
+            Equal("PowerShell", ShellCatalog.ChooseInitialShell("CMD", absent));
+            Equal("PowerShell", ShellCatalog.ChooseInitialShell("WSL", absent));
         }
 
         private static void FailedStartup(string directory)
         {
             bool failed = false;
-            try { using (ShellSession.Start("CMD", Path.Combine(directory, "does-not-exist"))) { } }
+            try { using (ShellSession.Start("PowerShell", Path.Combine(directory, "does-not-exist"))) { } }
             catch (System.ComponentModel.Win32Exception) { failed = true; }
             Assert(failed, "Invalid working directory should fail startup");
         }
 
         private static void DrainExit(string directory)
         {
-            using (var session = ShellSession.Start("CMD", directory))
+            using (var session = ShellSession.Start("PowerShell", directory))
             {
-                Send(session, "echo STDOUT-LAST& echo STDERR-LAST 1>&2& exit /b 7");
+                Send(session, "[Console]::WriteLine('STDOUT-LAST'); [Console]::Error.WriteLine('STDERR-LAST'); exit 7");
                 string errors;
                 int code;
                 string text = DrainUntilExit(session, out errors, out code);
@@ -281,11 +280,11 @@ namespace UnityTerminal.Tests
 
         private static void Backpressure(string directory)
         {
-            var session = ShellSession.Start("CMD", directory);
+            var session = ShellSession.Start("PowerShell", directory);
             try
             {
-                Send(session, "for /l %i in (1,1,10000) do @echo LINE-%i-abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0123456789");
-                Send(session, "exit /b 0");
+                Send(session, "1..10000 | ForEach-Object { [Console]::WriteLine(('LINE-' + $_ + '-abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0123456789')) }");
+                Send(session, "exit 0");
                 Thread.Sleep(300);
                 var queue = (System.Collections.ICollection)typeof(ShellSession).GetField("output", BindingFlags.NonPublic | BindingFlags.Instance).GetValue(session);
                 object sync = typeof(ShellSession).GetField("queueLock", BindingFlags.NonPublic | BindingFlags.Instance).GetValue(session);
@@ -303,10 +302,10 @@ namespace UnityTerminal.Tests
             Assert(!session.TrySend("echo after-close", out error), "Disposed session accepted input");
 
             // Closing while producers wait for queue space must also release both workers.
-            var blocked = ShellSession.Start("CMD", directory);
+            var blocked = ShellSession.Start("PowerShell", directory);
             try
             {
-                Send(blocked, "for /l %i in (1,1,100000) do @echo LINE-%i-abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0123456789");
+                Send(blocked, "1..100000 | ForEach-Object { [Console]::WriteLine(('LINE-' + $_ + '-abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0123456789')) }");
                 var queue = (System.Collections.ICollection)typeof(ShellSession).GetField("output", BindingFlags.NonPublic | BindingFlags.Instance).GetValue(blocked);
                 object sync = typeof(ShellSession).GetField("queueLock", BindingFlags.NonPublic | BindingFlags.Instance).GetValue(blocked);
                 var timer = Stopwatch.StartNew();
@@ -329,15 +328,15 @@ namespace UnityTerminal.Tests
         {
             for (int i = 0; i < 3; i++)
             {
-                var previous = ShellSession.Start("CMD", directory);
+                var previous = ShellSession.Start("PowerShell", directory);
                 Process process = (Process)typeof(ShellSession).GetField("process", BindingFlags.NonPublic | BindingFlags.Instance).GetValue(previous);
                 int pid = process.Id;
                 Send(previous, "echo OLD-SESSION");
                 previous.Dispose();
                 Assert(!IsAlive(pid), "Previous shell survived disposal");
-                using (var current = ShellSession.Start("CMD", directory))
+                using (var current = ShellSession.Start("PowerShell", directory))
                 {
-                    Send(current, "echo NEW-SESSION& exit /b 0");
+                    Send(current, "echo NEW-SESSION; exit 0");
                     string errors;
                     int code;
                     string text = DrainUntilExit(current, out errors, out code);

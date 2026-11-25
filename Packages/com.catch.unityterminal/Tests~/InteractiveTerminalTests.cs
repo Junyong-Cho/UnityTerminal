@@ -21,6 +21,7 @@ namespace UnityTerminal.Tests
             Check("scroll region, editing, resize and bounded history", Scrolling);
             Check("terminal queries and extended colors", QueriesAndColors);
             Check("keyboard encoding, paste and Codex command detection", Keyboard);
+            Check("WSL prompts use ConPTY while commands and management stay in PowerShell", WslCommands);
             if (native)
             {
                 Check("ConPTY has real console handles, keys, resize and tail output", () => NativeConsole(probe));
@@ -107,6 +108,23 @@ namespace UnityTerminal.Tests
             Assert(TerminalInput.IsCodexCommand("codex") && TerminalInput.IsCodexCommand("codex resume") &&
                 TerminalInput.IsCodexCommand("& 'C:/some folder/codex.exe' --help") && !TerminalInput.IsCodexCommand("echo codex"), "Codex detection is incorrect");
             Equal("\"a\\\"b\\\\\"", ConPtySession.QuoteArgument("a\"b\\"));
+        }
+
+        private static void WslCommands()
+        {
+            foreach (string command in new[] {
+                "wsl", "WSL.EXE", "wsl -d Ubuntu", "wsl --distribution 'Ubuntu Test' --user root",
+                "wsl --cd ~", "wsl ~", "wsl --distribution=Ubuntu --cd=/tmp", "wsl --system",
+                "& 'C:/Windows/System32/wsl.exe' -d Ubuntu", "wsl -e bash", "wsl --exec /bin/bash --login",
+                "wsl -- bash -i", "wsl zsh", "wsl -d Ubuntu -- codex", "wsl -e codex resume" })
+                Assert(TerminalInput.IsInteractiveWslCommand(command), "WSL prompt did not use ConPTY: " + command);
+            foreach (string command in new[] {
+                "echo wsl", "wsl-not-a-command", "wsl --list", "wsl -l -v", "wsl --status", "wsl --version",
+                "wsl --help", "wsl --install", "wsl --update", "wsl --shutdown", "wsl --terminate Ubuntu",
+                "wsl --unregister Ubuntu", "wsl uname -a", "wsl -d Ubuntu --exec uname -a", "wsl bash -lc 'echo hello'",
+                "wsl -d", "wsl --user", "wsl --cd=", "wsl --exec", "wsl -d ''", "wsl; echo done",
+                "wsl | Out-String", "wsl > output.txt", "wsl $distribution", "wsl -d \"$distribution\"", "wsl -d 'unfinished" })
+                Assert(!TerminalInput.IsInteractiveWslCommand(command), "Noninteractive command was diverted: " + command);
         }
 
         private static void NativeConsole(string probe)
