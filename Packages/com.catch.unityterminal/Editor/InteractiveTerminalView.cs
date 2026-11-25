@@ -12,7 +12,12 @@ namespace UnityTerminal
         private GUIStyle compositionStyle;
         private Event inputEvent;
         private string committedText;
+        private bool composing;
+        private readonly TerminalComposition composition = new TerminalComposition();
         private float cellWidth = 8, cellHeight = 16;
+        private Font measuredFont;
+        private int measuredFontSize;
+        private float measuredPixelScale;
         private Rect bounds;
         private int control;
         private bool focusPending = true;
@@ -26,6 +31,38 @@ namespace UnityTerminal
 
         public InteractiveTerminalView(TerminalScreen screen) { this.screen = screen; }
 
+        public void ResetComposition() { composition.Reset(); }
+
+        [Serializable] internal sealed class ViewState { public int ScrollBack, SelectionStart, SelectionEnd; }
+        internal ViewState CaptureState() { return new ViewState { ScrollBack = scrollBack, SelectionStart = selectionStart, SelectionEnd = selectionEnd }; }
+        internal void RestoreState(ViewState state)
+        {
+            scrollBack = Mathf.Clamp(state.ScrollBack, 0, screen.HistoryCount);
+            int last = screen.Columns * screen.Rows - 1;
+            selectionStart = Mathf.Clamp(state.SelectionStart, -1, last); selectionEnd = Mathf.Clamp(state.SelectionEnd, -1, last);
+            selectionVersion = screen.Version; selecting = false;
+        }
+
+        internal static Vector2 MeasureCellSize(Font font, int fontSize)
+        {
+            var style = new GUIStyle { font = font, fontSize = fontSize, richText = false, wordWrap = false };
+            return MeasureCellSize(style);
+        }
+
+        private static Vector2 MeasureCellSize(GUIStyle style)
+        {
+            // Measure advances, excluding per-label rounding/padding. A long sample also
+            // avoids accumulating a rounded single-character width across the row.
+            float width = (style.CalcSize(new GUIContent(new string('M', 33))).x - style.CalcSize(new GUIContent("M")).x) / 32;
+            return new Vector2(Mathf.Max(1, width), Mathf.Max(style.fontSize + 3, style.lineHeight));
+        }
+
+        internal static Vector2Int MeasureGridSize(Vector2 area, Vector2 cell)
+        {
+            return new Vector2Int(Mathf.Clamp(Mathf.FloorToInt((area.x - 8) / cell.x), 2, 500),
+                Mathf.Clamp(Mathf.FloorToInt((area.y - 22) / cell.y), 2, 300));
+        }
+
         public void Draw(Rect rect, Font font, int fontSize, bool windowFocused)
         {
             bounds = rect;
@@ -33,12 +70,16 @@ namespace UnityTerminal
             textStyle.font = font;
             textStyle.fontSize = fontSize;
             textStyle.fontStyle = FontStyle.Normal;
-            cellWidth = Mathf.Max(1, textStyle.CalcSize(new GUIContent("M")).x);
-            cellHeight = Mathf.Max(fontSize + 3, textStyle.lineHeight);
+            if (measuredFont != font || measuredFontSize != fontSize || measuredPixelScale != EditorGUIUtility.pixelsPerPoint)
+            {
+                Vector2 cell = MeasureCellSize(textStyle);
+                cellWidth = cell.x; cellHeight = cell.y;
+                measuredFont = font; measuredFontSize = fontSize; measuredPixelScale = EditorGUIUtility.pixelsPerPoint;
+            }
             if (Event.current.type == EventType.Repaint)
             {
-                int columns = Mathf.Clamp(Mathf.FloorToInt((rect.width - 8) / cellWidth), 2, 500);
-                int rows = Mathf.Clamp(Mathf.FloorToInt((rect.height - 22) / cellHeight), 2, 300);
+                Vector2Int grid = MeasureGridSize(rect.size, new Vector2(cellWidth, cellHeight));
+                int columns = grid.x, rows = grid.y;
                 if (columns != screen.Columns || rows != screen.Rows)
                 {
                     if (Resize != null) Resize(columns, rows);
@@ -56,9 +97,21 @@ namespace UnityTerminal
             compositionStyle.fontSize = fontSize;
             compositionStyle.normal.textColor = Rgb(0xd4d4d4);
             GUI.SetNextControlName("InteractiveTerminal");
-            Rect compositionRect = new Rect(rect.x + 4 + screen.CursorX * cellWidth, rect.y + 2 + screen.CursorY * cellHeight,
+            Rect cursorCell = GetCursorCellRect();
+            Rect compositionRect = new Rect(rect.x + cursorCell.x, rect.y + cursorCell.y,
                 Mathf.Max(160, rect.width - 8 - screen.CursorX * cellWidth), cellHeight);
-            committedText = GUI.TextField(compositionRect, "", compositionStyle);
+            composition.BeginEvent();
+            Color caretColor = GUI.skin.settings.cursorColor;
+            try
+            {
+                // This control receives IME text; the VT cursor below represents the app.
+                // Keep Unity's caret only while its composition text is actually visible.
+                if (Input.compositionString.Length == 0 || !screen.CursorVisible || scrollBack != 0)
+                    GUI.skin.settings.cursorColor = Color.clear;
+                committedText = GUI.TextField(compositionRect, "", compositionStyle);
+            }
+            finally { GUI.skin.settings.cursorColor = caretColor; }
+            composing = composition.ConsumesNavigation(inputEvent ?? Event.current);
             if (focusPending && Event.current.type != EventType.Layout)
             {
                 GUI.FocusControl("InteractiveTerminal");
@@ -94,8 +147,9 @@ namespace UnityTerminal
                     int count = width;
                     string text = cell.Text ?? " ";
                     bool selected = Selected(x, y);
-                    // Batch ASCII runs while positioning Unicode glyphs in their own cells.
-                    if (width == 1 && text.Length == 1 && text[0] < 127)
+                    // Unity adds spacing to synthetic bold/italic text, even for a mono
+                    // font. Keep styled glyphs on individual cells without stretching them.
+                    if (width == 1 && text.Length == 1 && text[0] < 127 && !cell.Style.Bold && !cell.Style.Italic)
                     {
                         var run = new StringBuilder(text);
                         while (x + count < Math.Min(screen.Columns, line.Length))
@@ -120,16 +174,31 @@ namespace UnityTerminal
                     x += count;
                 }
             }
-            if (scrollBack == 0 && screen.CursorVisible && windowFocused && GUIUtility.keyboardControl == control && (int)(EditorApplication.timeSinceStartup * 2) % 2 == 0)
+            bool blinkingCursor = screen.CursorShape == 0 || screen.CursorShape == 1 || screen.CursorShape == 3 || screen.CursorShape == 5;
+            if (scrollBack == 0 && screen.CursorVisible && windowFocused && GUIUtility.keyboardControl == control &&
+                Input.compositionString.Length == 0 && (!blinkingCursor || (int)(EditorApplication.timeSinceStartup * 2) % 2 == 0))
             {
-                float width = screen.CursorShape >= 5 ? 2 : cellWidth;
-                float height = screen.CursorShape == 3 || screen.CursorShape == 4 ? 2 : cellHeight;
-                EditorGUI.DrawRect(new Rect(4 + screen.CursorX * cellWidth, 2 + screen.CursorY * cellHeight + cellHeight - height, width, height), new Color(0.8f, 0.8f, 0.8f, 0.45f));
+                EditorGUI.DrawRect(GetCursorPaintRect(), new Color(0.8f, 0.8f, 0.8f, 0.45f));
             }
             textStyle.fontStyle = FontStyle.Normal;
             textStyle.normal.textColor = new Color(0.65f, 0.65f, 0.65f);
-            GUI.Label(new Rect(4, bounds.height - 19, bounds.width - 8, 19), status ?? "Ctrl+C interrupt   Ctrl+V paste   Ctrl+Shift+C copy   Script reload waits for exit", textStyle);
+            GUI.Label(new Rect(4, bounds.height - 19, bounds.width - 8, 19), status ?? "Ctrl+C interrupt   Ctrl+V paste   Ctrl+Shift+C copy", textStyle);
             GUI.EndClip();
+        }
+
+        private Rect GetCursorCellRect()
+        {
+            ScreenCell cell = screen.GetLine(screen.CursorY)[screen.CursorX];
+            return new Rect(4 + screen.CursorX * cellWidth, 2 + screen.CursorY * cellHeight,
+                Math.Max(1, cell.Width) * cellWidth, cellHeight);
+        }
+
+        private Rect GetCursorPaintRect()
+        {
+            Rect cursor = GetCursorCellRect();
+            if (screen.CursorShape >= 5) cursor.width = Mathf.Max(1, 1 / EditorGUIUtility.pixelsPerPoint);
+            if (screen.CursorShape == 3 || screen.CursorShape == 4) { cursor.y = cursor.yMax - 2; cursor.height = 2; }
+            return cursor;
         }
 
         // Called after the window has finished registering all GUILayout controls.
@@ -173,26 +242,37 @@ namespace UnityTerminal
                 if (original.type == EventType.ExecuteCommand) { if (original.commandName == "Paste") Paste(); else Copy(); }
                 e.Use(); return true;
             }
+            // IME commits can arrive independently of a navigation KeyDown. Never forward
+            // composition editing keys (including the Enter that accepts a syllable).
+            if (!string.IsNullOrEmpty(committedText) &&
+                (inputEvent == null || (!inputEvent.control && !inputEvent.alt && !inputEvent.command)))
+            {
+                SendText(committedText);
+                if (e.type != EventType.Layout && e.type != EventType.Repaint) e.Use();
+                return true;
+            }
+            if (composing) { if (inputEvent != null) e.Use(); return inputEvent != null; }
             if (inputEvent == null) return false;
             Event keyEvent = inputEvent;
             if (keyEvent.type == EventType.KeyUp) { e.Use(); return true; }
             if (keyEvent.type != EventType.KeyDown) return false;
+
             if ((keyEvent.control || keyEvent.command) && keyEvent.keyCode == KeyCode.V) { Paste(); e.Use(); return true; }
             if ((keyEvent.control || keyEvent.command) && keyEvent.shift && keyEvent.keyCode == KeyCode.C) { Copy(); e.Use(); return true; }
             TerminalKey key = MapKey(keyEvent.keyCode);
             char character = keyEvent.character;
             if (keyEvent.control && character == '\0' && keyEvent.keyCode >= KeyCode.A && keyEvent.keyCode <= KeyCode.Z)
                 character = (char)('a' + (int)keyEvent.keyCode - (int)KeyCode.A);
-            string text;
-            if (!string.IsNullOrEmpty(committedText) && !keyEvent.control && !keyEvent.alt) text = committedText;
-            else text = key == TerminalKey.Character && !keyEvent.control && !keyEvent.alt ? null :
+            string text = key == TerminalKey.Character && !keyEvent.control && !keyEvent.alt ? null :
                 TerminalInput.Encode(key, character, keyEvent.shift, keyEvent.alt, keyEvent.control, screen.ApplicationCursor);
-            if (text != null)
-            {
-                scrollBack = 0; selectionStart = selectionEnd = -1; status = null;
-                if (Send != null) Send(text);
-            }
+            if (text != null) SendText(text);
             e.Use(); return true;
+        }
+
+        private void SendText(string text)
+        {
+            scrollBack = 0; selectionStart = selectionEnd = -1; status = null;
+            if (Send != null) Send(text);
         }
 
         private static TerminalKey MapKey(KeyCode key)

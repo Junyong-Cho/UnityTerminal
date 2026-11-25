@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Text;
 
 namespace UnityTerminal
@@ -186,6 +187,43 @@ namespace UnityTerminal
             cachedRichText = result.ToString();
             cachedVersion = Version;
             return cachedRichText;
+        }
+
+        internal void WriteDisplayState(BinaryWriter writer)
+        {
+            writer.Write(lines.Count);
+            foreach (Line line in lines)
+            {
+                writer.Write(line.Spans.Count);
+                foreach (Span span in line.Spans)
+                {
+                    writer.Write(span.Style.Color ?? ""); writer.Write(span.Style.Bold); writer.Write(span.Style.Italic);
+                    writer.Write(span.Text.ToString());
+                }
+            }
+        }
+
+        internal void ReadDisplayState(BinaryReader reader)
+        {
+            Clear(); lines.Clear();
+            int count = reader.ReadInt32();
+            if (count < 1 || count > maxLines) throw new InvalidDataException("Invalid terminal buffer size.");
+            for (int i = 0; i < count; i++)
+            {
+                lastLine = new Line(); lines.Enqueue(lastLine);
+                int spans = reader.ReadInt32();
+                if (spans < 0 || spans > maxLineLength) throw new InvalidDataException("Invalid terminal span count.");
+                for (int j = 0; j < spans; j++)
+                {
+                    string color = reader.ReadString();
+                    var span = new Span { Style = new TerminalStyle { Color = color == "" ? null : color, Bold = reader.ReadBoolean(), Italic = reader.ReadBoolean() } };
+                    string text = reader.ReadString();
+                    if (lastLine.Length + text.Length > maxLineLength) throw new InvalidDataException("Terminal line exceeds its limit.");
+                    span.Text.Append(text); lastLine.Spans.Add(span); lastLine.Length += text.Length; characterCount += text.Length;
+                }
+            }
+            if (characterCount > maxCharacters) throw new InvalidDataException("Terminal buffer exceeds its limit.");
+            Version++;
         }
     }
 }

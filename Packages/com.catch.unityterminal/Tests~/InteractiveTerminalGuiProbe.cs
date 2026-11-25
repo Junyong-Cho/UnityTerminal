@@ -14,6 +14,7 @@ namespace UnityTerminal.Tests
         private const BindingFlags Private = BindingFlags.NonPublic | BindingFlags.Instance;
         private static readonly Type WindowType = typeof(UnityTerminalWindow);
         private static string requestedShell = "PowerShell";
+        private static bool verifyWsl;
         private readonly StringBuilder trace = new StringBuilder();
         private EditorWindow previous;
         private double next;
@@ -31,12 +32,15 @@ namespace UnityTerminal.Tests
         private object primaryShell;
         private string stablePrimaryText;
         private double primaryStableSince;
+        private int initialColumns, initialRows;
 
         [InitializeOnLoadMethod]
         private static void Requested()
         {
             if (AssetDatabase.IsAssetImportWorkerProcess() || !File.Exists("Temp/RunInteractiveGuiProbe")) return;
-            requestedShell = File.ReadAllText("Temp/RunInteractiveGuiProbe").Trim() == "PowerShell7" ? "PowerShell7" : "PowerShell";
+            string request = File.ReadAllText("Temp/RunInteractiveGuiProbe").Trim();
+            requestedShell = request.StartsWith("PowerShell7", StringComparison.Ordinal) ? "PowerShell7" : "PowerShell";
+            verifyWsl = request.EndsWith("+WSL", StringComparison.Ordinal);
             File.Delete("Temp/RunInteractiveGuiProbe");
             WindowType.Assembly.GetType("UnityTerminal.ShellCatalog").GetMethod("Refresh").Invoke(null, null);
             EditorApplication.update += StartProbe;
@@ -63,10 +67,7 @@ namespace UnityTerminal.Tests
             Set("currentWorkingDirectory", project);
             // Keep a real primary shell alive while the separate app page is displayed.
             object buffer = Get("buffer");
-            Type parserType = WindowType.Assembly.GetType("UnityTerminal.AnsiParser");
-            Set("outputParser", Activator.CreateInstance(parserType, new[] { buffer, (object)false }));
-            Set("errorParser", Activator.CreateInstance(parserType, new[] { buffer, (object)true }));
-            Type shellType = WindowType.Assembly.GetType("UnityTerminal.ShellSession");
+            Type shellType = WindowType.Assembly.GetType("UnityTerminal.HostedShellSession");
             primaryShell = shellType.GetMethod("Start").Invoke(null, new object[] { requestedShell, project });
             Set("session", primaryShell);
             Require((bool)shellType.GetMethod("TrySend").Invoke(primaryShell, new object[] {
@@ -81,7 +82,7 @@ namespace UnityTerminal.Tests
             Set("scrollPosition", new Vector2(0, 150));
             originalClipboard = GUIUtility.systemCopyBuffer;
             next = EditorApplication.timeSinceStartup + 0.5;
-            deadline = next + 30;
+            deadline = next + 60;
             EditorApplication.update += Tick;
         }
         private void OnDisable()
@@ -136,7 +137,6 @@ namespace UnityTerminal.Tests
             Require((int)Get("inputCursorIndex") == primaryCursor && (int)Get("inputSelectIndex") == primarySelection,
                 "The primary caret/selection was not restored");
             Require(ReferenceEquals(Get("session"), primaryShell), "The primary shell session was replaced");
-            Require(!(bool)Get("interactiveReloadLocked"), "Script reload remained locked after closing the session");
         }
         private void Tick()
         {
@@ -164,17 +164,25 @@ namespace UnityTerminal.Tests
                         CapturePrimary();
                         bool started = (bool)WindowType.GetMethod("SendCommand", Private).Invoke(this, new object[] { "codex --no-daemon --sandbox read-only" });
                         Require(started && Get("interactiveSession") != null, "Codex command did not switch the terminal into interactive mode");
-                        Require((bool)Get("interactiveReloadLocked"), "Script reload can terminate the active session");
+                        object initialScreen = Get("interactiveScreen");
+                        initialColumns = (int)initialScreen.GetType().GetProperty("Columns").GetValue(initialScreen, null);
+                        initialRows = (int)initialScreen.GetType().GetProperty("Rows").GetValue(initialScreen, null);
+                        Require(primaryShell.GetType().GetProperty("IsReady").GetValue(primaryShell, null).Equals(true), "The persistent host is not connected");
                         stage++; break;
                     case 1:
                         string text = ScreenText();
                         if (!inputFocused || !text.Contains("OpenAI Codex") || !text.Contains("Ask Codex")) return;
+                        object readyScreen = Get("interactiveScreen");
+                        Require((int)readyScreen.GetType().GetProperty("Columns").GetValue(readyScreen, null) == initialColumns &&
+                            (int)readyScreen.GetType().GetProperty("Rows").GetValue(readyScreen, null) == initialRows,
+                            "Initial ConPTY dimensions differ from the painted grid and force an immediate resize");
+                        trace.AppendLine("PASS: initial ConPTY dimensions match the painted grid");
                         trace.AppendLine("PASS: Codex UI rendered and interactive input focused");
-                        foreach (char c in "local-input-check") Press(KeyCode.None, c, EventModifiers.None);
+                        foreach (char c in "local-input-check-\uD55C\uAE00") Press(KeyCode.None, c, EventModifiers.None);
                         stage++; break;
                     case 2:
-                        if (!ScreenText().Contains("local-input-check")) return;
-                        trace.AppendLine("PASS: typed text reached the real Codex prompt without submission");
+                        if (!ScreenText().Contains("local-input-check-\uD55C\uAE00")) return;
+                        trace.AppendLine("PASS: typed ASCII and Korean character events reached the real Codex prompt without submission");
                         Press(KeyCode.U, '\0', EventModifiers.Control);
                         GUIUtility.systemCopyBuffer = "paste-\uD55C\uAE00-check";
                         Press(KeyCode.V, '\0', EventModifiers.Control);
@@ -217,13 +225,42 @@ namespace UnityTerminal.Tests
                     case 8:
                         Press(KeyCode.Return, '\n', EventModifiers.None);
                         stage++; break;
-                    default:
+                    case 9:
                         if (Get("interactiveSession") != null || inputFocused) return;
                         Require((string)Get("currentInput") == "" && (int)Get("inputCursorIndex") == 0 && (int)Get("inputSelectIndex") == 0,
                             "The executed Codex command was restored instead of its empty prompt");
                         Require(PrimaryText() == primaryText, "Executing Codex from the command field changed primary output");
                         Require(ReferenceEquals(Get("session"), primaryShell), "The original shell did not survive repeated app pages");
-                        Finish("PASS: Codex app page, input, resize, Stop/natural-exit restoration and the consumed launch command");
+                        if (!verifyWsl)
+                        {
+                            Finish("PASS: Codex app page, input, resize, Stop/natural-exit restoration and the consumed launch command");
+                            return;
+                        }
+                        CapturePrimary();
+                        Require((bool)WindowType.GetMethod("SendCommand", Private).Invoke(this, new object[] { "wsl -d Ubuntu" }), "WSL launch failed");
+                        Require(Get("interactiveSession") != null, "WSL did not open the interactive page");
+                        stage++; break;
+                    case 10:
+                        if (!inputFocused) return;
+                        WindowType.GetMethod("SendInteractive", Private).Invoke(this, new object[] { "printf '\\n%s%s\\n' GUI_ WSL_READY\r" });
+                        stage++; break;
+                    case 11:
+                        if (!ScreenText().Contains("GUI_WSL_READY")) return;
+                        foreach (char c in "test -d Pack") Press(KeyCode.None, c, EventModifiers.None);
+                        Press(KeyCode.Tab, '\t', EventModifiers.None);
+                        foreach (char c in " && printf '\\n%s%s\\n' GUI_ WSL_TAB_OK") Press(KeyCode.None, c, EventModifiers.None);
+                        Press(KeyCode.Return, '\r', EventModifiers.None);
+                        stage++; break;
+                    case 12:
+                        if (!ScreenText().Contains("GUI_WSL_TAB_OK")) return;
+                        trace.AppendLine("PASS: PowerShell launches WSL in the Unity interactive page and Linux handles Tab completion");
+                        WindowType.GetMethod("SendInteractive", Private).Invoke(this, new object[] { "exit 0\r" });
+                        stage++; break;
+                    default:
+                        if (Get("interactiveSession") != null || inputFocused) return;
+                        RequirePrimaryRestored();
+                        trace.AppendLine("PASS: exit from WSL restores the same PowerShell process, scrollback and input state");
+                        Finish("PASS: Codex and WSL interactive pages, input, resize and original PowerShell restoration");
                         return;
                 }
                 next = EditorApplication.timeSinceStartup + 0.25;

@@ -1,6 +1,5 @@
 using System;
 using System.IO;
-using System.Diagnostics;
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEditor;
@@ -21,20 +20,25 @@ namespace UnityTerminal
             window.Show();
         }
 
-        private ShellSession session;
-        private ConPtySession interactiveSession;
+        [NonSerialized] private HostedShellSession session;
+        [NonSerialized] private HostedInteractiveSession interactiveSession;
         private TerminalScreen interactiveScreen;
         private InteractiveTerminalView interactiveView;
         private int interactiveBlink;
-        private bool interactiveReloadLocked;
+        [NonSerialized] private bool reloadInProgress;
+        [NonSerialized] private InteractiveTerminalView.ViewState pendingInteractiveView;
         private PrimaryViewState primaryViewState;
         private bool preservePrimaryViewport;
+        private Vector2 terminalBodySize;
         private string interactiveStatus;
         private int inputCursorIndex;
         private int inputSelectIndex;
         private int pendingSelection = -1;
+        private bool inputMethodActive;
+        private IMECompositionMode previousInputMethod;
+        private readonly TerminalComposition inputComposition = new TerminalComposition();
 
-        private sealed class PrimaryViewState
+        [Serializable] private sealed class PrimaryViewState
         {
             public string Input;
             public int Cursor, Selection, HistoryIndex;
@@ -42,8 +46,6 @@ namespace UnityTerminal
             public bool ScrollPending;
         }
         private readonly TerminalBuffer buffer = new TerminalBuffer();
-        private AnsiParser outputParser;
-        private AnsiParser errorParser;
         private readonly PathCompletion completion = new PathCompletion();
         private readonly List<string> commandHistory = new List<string>();
         private string currentInput = "";
@@ -60,25 +62,39 @@ namespace UnityTerminal
         private bool scrollToBottomPending;
         private bool focusInputPending = true;
         private int pendingCaret = -1;
-        private GUIStyle terminalStyle;
-        private GUIStyle inputStyle;
+        [NonSerialized] private Font terminalFont;
+        [NonSerialized] private GUIStyle terminalStyle;
+        [NonSerialized] private GUIStyle inputStyle;
         private int measuredVersion = -1;
         private float measuredWidth;
         private int measuredFontSize;
         private float measuredHeight;
 
+        [Serializable] private sealed class WindowResume
+        {
+            public HostResumeInfo Connection;
+            public string Shell, Directory, Input, InteractiveId, Status;
+            public string[] History;
+            public int Cursor, Selection, HistoryIndex, Columns, Rows;
+            public Vector2 Scroll;
+            public bool ScrollPending, PreserveViewport;
+            public PrimaryViewState Primary;
+            public InteractiveTerminalView.ViewState AppView;
+        }
+        private string ResumeKey { get { return "UnityTerminal.Host." + GetInstanceID(); } }
+
         private void OnEnable()
         {
-            AssemblyReloadEvents.beforeAssemblyReload += KillShellProcess;
+            measuredVersion = -1;
+            AssemblyReloadEvents.beforeAssemblyReload += BeforeReload;
             EditorApplication.quitting += KillShellProcess;
             shellType = EditorPrefs.GetString("UnityTerminal_ShellType", "");
             if (!ShellCatalog.IsKnownShell(shellType)) shellType = "";
             fontSize = Mathf.Clamp(EditorPrefs.GetInt("UnityTerminal_FontSize", 12), 10, 24);
             autoScroll = EditorPrefs.GetBool("UnityTerminal_AutoScroll", true);
-            outputParser = new AnsiParser(buffer);
-            errorParser = new AnsiParser(buffer, true);
             ShellCatalog.Refresh();
             RefreshShellOptions();
+            if (RestoreHostedSession()) return;
             waitingForShellDiscovery = shellType == "" || shellType == "PowerShell7";
             if (waitingForShellDiscovery) ClearTerminalBuffer();
             else StartShell();
@@ -86,20 +102,99 @@ namespace UnityTerminal
 
         private void OnDisable()
         {
-            AssemblyReloadEvents.beforeAssemblyReload -= KillShellProcess;
+            RestoreInputMethod();
+            AssemblyReloadEvents.beforeAssemblyReload -= BeforeReload;
             EditorApplication.quitting -= KillShellProcess;
-            KillShellProcess();
-            if (terminalStyle != null && terminalStyle.font != null) DestroyImmediate(terminalStyle.font);
+            if (!reloadInProgress) KillShellProcess();
+            if (terminalFont != null) DestroyImmediate(terminalFont);
+            terminalFont = null;
             terminalStyle = null;
             inputStyle = null;
+        }
+
+        private void OnLostFocus() { RestoreInputMethod(); }
+
+        private void BeforeReload()
+        {
+            reloadInProgress = true;
+            RestoreInputMethod();
+            if (session == null) return;
+            var saved = new WindowResume { Shell = shellType, Directory = currentWorkingDirectory, Input = currentInput,
+                History = commandHistory.ToArray(), Cursor = inputCursorIndex, Selection = inputSelectIndex, HistoryIndex = historyIndex,
+                Scroll = scrollPosition, ScrollPending = scrollToBottomPending, PreserveViewport = preservePrimaryViewport,
+                Primary = primaryViewState, Status = interactiveStatus,
+                InteractiveId = interactiveSession == null ? "" : interactiveSession.Id,
+                Columns = interactiveScreen == null ? 80 : interactiveScreen.Columns, Rows = interactiveScreen == null ? 24 : interactiveScreen.Rows,
+                AppView = interactiveView == null ? null : interactiveView.CaptureState() };
+            saved.Connection = session.Detach();
+            SessionState.SetString(ResumeKey, JsonUtility.ToJson(saved));
+            session = null; interactiveSession = null; interactiveScreen = null; interactiveView = null;
+        }
+
+        private bool RestoreHostedSession()
+        {
+            string json = SessionState.GetString(ResumeKey, "");
+            if (json == "") return false;
+            try
+            {
+                WindowResume saved = JsonUtility.FromJson<WindowResume>(json);
+                if (saved == null || saved.Connection == null || string.IsNullOrEmpty(saved.Connection.PipeName)) { SessionState.EraseString(ResumeKey); return false; }
+                session = HostedShellSession.Attach(saved.Connection);
+                shellType = saved.Shell; currentWorkingDirectory = saved.Directory; currentInput = saved.Input ?? "";
+                commandHistory.Clear();
+                if (saved.History != null)
+                    for (int i = Math.Max(0, saved.History.Length - 200); i < saved.History.Length; i++) commandHistory.Add(saved.History[i]);
+                inputCursorIndex = saved.Cursor; inputSelectIndex = saved.Selection;
+                pendingCaret = saved.Cursor; pendingSelection = saved.Selection; historyIndex = saved.HistoryIndex;
+                scrollPosition = saved.Scroll; scrollToBottomPending = saved.ScrollPending; preservePrimaryViewport = saved.PreserveViewport;
+                primaryViewState = saved.Primary; interactiveStatus = saved.Status;
+                waitingForShellDiscovery = false; focusInputPending = true;
+                if (!string.IsNullOrEmpty(saved.InteractiveId))
+                {
+                    interactiveSession = session.RestoreInteractive(saved.InteractiveId);
+                    CreateInteractiveView(saved.Columns, saved.Rows);
+                    pendingInteractiveView = saved.AppView;
+                }
+                return true;
+            }
+            catch (Exception ex)
+            {
+                SessionState.EraseString(ResumeKey);
+                if (session != null) session.Dispose(); session = null;
+                UnityEngine.Debug.LogWarning("[Terminal] Unable to reconnect: " + ex.Message);
+                return false;
+            }
+        }
+
+        private void UpdateInputMethod()
+        {
+            string focusedControl = GUI.GetNameOfFocusedControl();
+            bool textFocused = focusedWindow == this && !waitingForShellDiscovery &&
+                (focusedControl == "TerminalInput" || focusedControl == "InteractiveTerminal");
+            if (!textFocused) { RestoreInputMethod(); return; }
+            if (!inputMethodActive)
+            {
+                previousInputMethod = Input.imeCompositionMode;
+                inputMethodActive = true;
+            }
+            // GUI.TextField does not enable editor IME the way EditorGUI.TextField does.
+            EditorGUIUtility.editingTextField = true;
+            Input.imeCompositionMode = IMECompositionMode.On;
+        }
+
+        private void RestoreInputMethod()
+        {
+            if (!inputMethodActive) return;
+            inputMethodActive = false;
+            Input.imeCompositionMode = previousInputMethod;
+            inputComposition.Reset();
+            if (interactiveView != null) interactiveView.ResetComposition();
         }
 
         private void StartShell()
         {
             KillShellProcess();
             ClearTerminalBuffer();
-            outputParser.Reset();
-            errorParser.Reset();
             completion.Reset();
             currentInput = "";
             historyIndex = -1;
@@ -112,7 +207,7 @@ namespace UnityTerminal
             AppendSystemMessage($"[System] Starting {shellType} session in:\n{currentWorkingDirectory}\n");
             try
             {
-                session = ShellSession.Start(shellType, currentWorkingDirectory);
+                session = HostedShellSession.Start(shellType, currentWorkingDirectory);
             }
             catch (Exception ex)
             {
@@ -123,6 +218,8 @@ namespace UnityTerminal
 
         private void KillShellProcess()
         {
+            pendingInteractiveView = null;
+            SessionState.EraseString(ResumeKey);
             if (interactiveSession != null)
             {
                 interactiveSession.Dispose();
@@ -131,9 +228,8 @@ namespace UnityTerminal
                 interactiveView = null;
                 EditorGUIUtility.editingTextField = false;
             }
-            UnlockInteractiveReload();
             primaryViewState = null;
-            ShellSession previous = session;
+            HostedShellSession previous = session;
             session = null;
             if (previous == null) return;
             previous.Dispose();
@@ -158,32 +254,26 @@ namespace UnityTerminal
                 shellType = ShellCatalog.ChooseInitialShell(shellType, shellOptions);
                 StartShell();
             }
+            if (session != null && session.Failure != null)
+            {
+                string error = session.Failure;
+                KillShellProcess();
+                AppendSystemMessage("\n[System Error] " + error + "\n");
+                Repaint(); return;
+            }
+            int version = buffer.Version;
+            if (session != null && session.ApplyBuffer(buffer))
+            {
+                string directory;
+                if (PathCompletion.TryReadWorkingDirectory(buffer.GetLastLineText(), out directory)) currentWorkingDirectory = directory;
+            }
             if (interactiveSession != null)
             {
-                // The primary buffer remains intact behind the interactive screen. Its
-                // bounded output queue retains any background output until we return.
+                // Both processes and parsing continue in the host while this page is visible.
                 UpdateInteractive();
                 return;
             }
             if (session == null) return;
-            int version = buffer.Version;
-            var timer = Stopwatch.StartNew();
-            int characters = 0;
-            ShellSession.OutputChunk chunk;
-            // Yield to the editor after at most 64 KiB or 6 ms of parsing per update.
-            while (characters < 65536 && timer.ElapsedMilliseconds < 6 && session.TryDequeue(out chunk))
-            {
-                (chunk.IsError ? errorParser : outputParser).Feed(chunk.Text);
-                characters += chunk.Text.Length;
-            }
-
-            if (version != buffer.Version)
-            {
-                string directory;
-                if (PathCompletion.TryReadWorkingDirectory(buffer.GetLastLineText(), out directory))
-                    currentWorkingDirectory = directory;
-            }
-
             int exitCode;
             if (session.TryGetExitCode(out exitCode))
             {
@@ -199,6 +289,7 @@ namespace UnityTerminal
 
         private void ClearTerminalBuffer()
         {
+            if (session != null) session.Clear();
             buffer.Clear();
             scrollPosition = Vector2.zero;
             Repaint();
@@ -206,6 +297,7 @@ namespace UnityTerminal
 
         private void AppendSystemMessage(string message)
         {
+            if (session != null) session.AppendSystemMessage(message);
             buffer.Append(message, new TerminalStyle { Color = "#808080", Italic = true });
         }
 
@@ -223,26 +315,16 @@ namespace UnityTerminal
                     Scroll = scrollPosition,
                     ScrollPending = scrollToBottomPending
                 };
-                // Agent edits must not unload the managed pipe readers mid-session.
-                EditorApplication.LockReloadAssemblies();
-                interactiveReloadLocked = true;
-                int columns = Mathf.Clamp((int)((position.width - 8) / Mathf.Max(1, terminalStyle.CalcSize(new GUIContent("M")).x)), 2, 500);
-                int rows = Mathf.Clamp((int)((position.height - 50) / Mathf.Max(fontSize + 3, terminalStyle.lineHeight)), 2, 300);
-                var started = ConPtySession.Start(shellType, command, currentWorkingDirectory, columns, rows);
+                if (session == null) throw new InvalidOperationException("PowerShell is not running. Use Restart.");
+                Vector2 area = terminalBodySize.x > 8 && terminalBodySize.y > 22 ? terminalBodySize :
+                    new Vector2(position.width, Mathf.Max(1, position.height - EditorStyles.toolbar.fixedHeight));
+                Vector2Int grid = InteractiveTerminalView.MeasureGridSize(area,
+                    InteractiveTerminalView.MeasureCellSize(terminalStyle.font, fontSize));
+                var started = session.StartInteractive(command, grid.x, grid.y);
                 interactiveSession = started;
                 primaryViewState = saved;
                 interactiveStatus = null;
-                interactiveScreen = new TerminalScreen(columns, rows);
-                interactiveScreen.Reply = SendInteractive;
-                interactiveView = new InteractiveTerminalView(interactiveScreen)
-                {
-                    Send = SendInteractive,
-                    Resize = (width, height) =>
-                    {
-                        try { if (interactiveSession != null) interactiveSession.Resize(width, height); }
-                        catch (Exception ex) { interactiveView.ShowError("Resize: " + ex.Message); }
-                    }
-                };
+                CreateInteractiveView(grid.x, grid.y);
                 completion.Reset();
                 Repaint();
                 return true;
@@ -254,7 +336,6 @@ namespace UnityTerminal
                 interactiveScreen = null;
                 interactiveView = null;
                 primaryViewState = null;
-                UnlockInteractiveReload();
                 AppendSystemMessage("\n[System Error] Unable to start the interactive terminal: " + ex.Message + "\n");
                 Repaint();
                 return false;
@@ -269,16 +350,12 @@ namespace UnityTerminal
 
         private void UpdateInteractive()
         {
-            var timer = Stopwatch.StartNew();
-            int characters = 0;
-            string text;
-            bool changed = false;
-            while (characters < 65536 && timer.ElapsedMilliseconds < 6 && interactiveSession.TryDequeue(out text))
+            bool changed = interactiveSession.ApplyScreen(interactiveScreen);
+            if (changed && pendingInteractiveView != null)
             {
-                interactiveScreen.Feed(text);
-                characters += text.Length;
-                changed = true;
+                interactiveView.RestoreState(pendingInteractiveView); pendingInteractiveView = null;
             }
+            if (!string.IsNullOrEmpty(interactiveSession.Notice)) interactiveView.ShowError(interactiveSession.Notice);
             int code;
             if (interactiveSession.TryGetExitCode(out code))
             {
@@ -301,6 +378,7 @@ namespace UnityTerminal
             interactiveSession = null;
             interactiveView = null;
             interactiveScreen = null;
+            pendingInteractiveView = null;
             EditorGUIUtility.editingTextField = false;
             // Closing the interactive page reveals the primary page; neither the app's
             // transcript nor a normal exit message belongs in the primary scrollback.
@@ -319,14 +397,17 @@ namespace UnityTerminal
             focusInputPending = true;
             preservePrimaryViewport = true;
             Repaint();
-            UnlockInteractiveReload();
         }
 
-        private void UnlockInteractiveReload()
+        private void CreateInteractiveView(int columns, int rows)
         {
-            if (!interactiveReloadLocked) return;
-            interactiveReloadLocked = false;
-            EditorApplication.UnlockReloadAssemblies();
+            interactiveScreen = new TerminalScreen(columns, rows);
+            interactiveView = new InteractiveTerminalView(interactiveScreen) { Send = SendInteractive,
+                Resize = (width, height) =>
+                {
+                    try { if (interactiveSession != null) interactiveSession.Resize(width, height); }
+                    catch (Exception ex) { if (interactiveView != null) interactiveView.ShowError("Resize: " + ex.Message); }
+                } };
         }
 
         private void InitStyles()
@@ -339,18 +420,18 @@ namespace UnityTerminal
                 terminalStyle.richText = true;
                 terminalStyle.wordWrap = true;
 
-                // Apply Monospaced dynamic OS fonts
-                string[] monospacedFonts = { "Consolas", "Courier New", "Courier", "monospace" };
-                foreach (string fontName in monospacedFonts)
-                {
-                    Font font = Font.CreateDynamicFontFromOSFont(fontName, fontSize);
-                    if (font != null)
-                    {
-                        terminalStyle.font = font;
-                        break;
-                    }
-                }
             }
+
+            // GUIStyle survives editor serialization, but a dynamically created Font can
+            // disappear on reload. Never let the terminal fall back to a proportional UI font.
+            if (terminalFont == null || terminalFont.fontSize != fontSize)
+            {
+                if (terminalFont != null) DestroyImmediate(terminalFont);
+                terminalFont = Font.CreateDynamicFontFromOSFont(new[] { "Consolas", "Courier New", "Courier", "monospace" }, fontSize);
+                terminalFont.hideFlags = HideFlags.HideAndDontSave;
+            }
+            terminalStyle.font = terminalFont;
+            terminalStyle.fontSize = fontSize;
 
             // Force text color on all states to prevent black text in Light Theme or when focused
             terminalStyle.normal.textColor = defaultTextColor;
@@ -361,18 +442,6 @@ namespace UnityTerminal
             terminalStyle.onHover.textColor = defaultTextColor;
             terminalStyle.onActive.textColor = defaultTextColor;
             terminalStyle.onFocused.textColor = defaultTextColor;
-
-            if (terminalStyle.fontSize != fontSize)
-            {
-                terminalStyle.fontSize = fontSize;
-                if (terminalStyle.font != null)
-                {
-                    // Re-create font with size to prevent text blurriness in IMGUI
-                    Font oldFont = terminalStyle.font;
-                    terminalStyle.font = Font.CreateDynamicFontFromOSFont(oldFont.name, fontSize);
-                    DestroyImmediate(oldFont);
-                }
-            }
 
             if (inputStyle == null)
             {
@@ -424,6 +493,7 @@ namespace UnityTerminal
 
             // Draw a single dark background for the entire terminal body (log + input)
             Rect bodyRect = EditorGUILayout.BeginVertical(GUILayout.ExpandWidth(true), GUILayout.ExpandHeight(true));
+            if (Event.current.type == EventType.Repaint) terminalBodySize = bodyRect.size;
             EditorGUI.DrawRect(bodyRect, new Color(0.118f, 0.118f, 0.118f));
 
             bool drewInteractive = interactiveSession != null;
@@ -434,7 +504,7 @@ namespace UnityTerminal
             }
             else
             {
-                EditorGUI.BeginDisabledGroup(waitingForShellDiscovery);
+                EditorGUI.BeginDisabledGroup(waitingForShellDiscovery || (session != null && !session.IsReady));
                 DrawOutputLog();
                 DrawInputLine();
                 EditorGUI.EndDisabledGroup();
@@ -456,6 +526,7 @@ namespace UnityTerminal
                     focusInputPending = false;
                 }
             }
+            UpdateInputMethod();
         }
 
         private void DrawToolbar()
@@ -499,6 +570,8 @@ namespace UnityTerminal
 
             if (interactiveStatus != null)
                 GUILayout.Label(new GUIContent("Interactive error", interactiveStatus), EditorStyles.miniLabel);
+            if (session != null && !session.IsReady)
+                GUILayout.Label("Connecting...", EditorStyles.miniLabel);
 
             // Display current folder name (clean UX)
             string displayFolder = "Root";
@@ -578,6 +651,7 @@ namespace UnityTerminal
             Rect inputRect = GUILayoutUtility.GetRect(new GUIContent(currentInput), inputStyle, GUILayout.ExpandWidth(true));
             Event inputEvent = Event.current.type == EventType.KeyDown || Event.current.type == EventType.KeyUp
                 ? new Event(Event.current) : null;
+            inputComposition.BeginEvent();
 
             GUI.SetNextControlName("TerminalInput");
             // Use the same IMGUI TextEditor state as completion and caret updates.
@@ -587,7 +661,13 @@ namespace UnityTerminal
             string cleanInput = newInput.Replace("\t", "");
             if (cleanInput != currentInput) completion.Reset();
             currentInput = cleanInput;
-            if (inputEvent != null) HandleKeyboardEvents(inputEvent);
+            // Enter may finish composition inside TextField. It must not also submit the command.
+            bool composing = inputComposition.ConsumesNavigation(inputEvent ?? Event.current);
+            if (inputEvent != null)
+            {
+                if (composing) Event.current.Use();
+                else HandleKeyboardEvents(inputEvent);
+            }
             if (pendingCaret >= 0 && GUI.GetNameOfFocusedControl() == "TerminalInput")
             {
                 TextEditor editor = (TextEditor)GUIUtility.GetStateObject(typeof(TextEditor), GUIUtility.keyboardControl);

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
 using System.Text;
 
 namespace UnityTerminal
@@ -434,6 +435,67 @@ namespace UnityTerminal
             state = ParseState.Text; highSurrogate = '\0'; sequence.Length = 0; LastAlternateText = null; Version++;
         }
         public string GetText() { return PageText(page); }
+
+        internal void WriteDisplayState(BinaryWriter writer)
+        {
+            writer.Write(Columns); writer.Write(Rows); writer.Write(CursorX); writer.Write(CursorY);
+            writer.Write(CursorVisible); writer.Write(CursorShape); writer.Write(ApplicationCursor); writer.Write(BracketedPaste); writer.Write(Alternate);
+            writer.Write(Title ?? ""); writer.Write(LastAlternateText ?? "");
+            writer.Write(HistoryCount);
+            if (!Alternate) foreach (ScreenCell[] line in history) WriteLine(writer, line);
+            foreach (ScreenCell[] line in page.Lines) WriteLine(writer, line);
+        }
+
+        private static void WriteLine(BinaryWriter writer, ScreenCell[] line)
+        {
+            writer.Write(line.Length);
+            for (int x = 0; x < line.Length; )
+            {
+                ScreenCell cell = line[x];
+                int count = 1;
+                while (x + count < line.Length && cell.Width == line[x + count].Width && cell.Text == line[x + count].Text && cell.Style.Equals(line[x + count].Style)) count++;
+                writer.Write(count); writer.Write(cell.Text ?? " "); writer.Write(cell.Width);
+                writer.Write(cell.Style.Foreground); writer.Write(cell.Style.Background);
+                writer.Write(cell.Style.Bold); writer.Write(cell.Style.Italic); writer.Write(cell.Style.Underline); writer.Write(cell.Style.Inverse);
+                x += count;
+            }
+        }
+
+        internal void ReadDisplayState(BinaryReader reader)
+        {
+            int columns = reader.ReadInt32(), rows = reader.ReadInt32();
+            ValidateSize(columns, rows); Columns = columns; Rows = rows;
+            int x = reader.ReadInt32(), y = reader.ReadInt32();
+            if (x < 0 || x >= columns || y < 0 || y >= rows) throw new InvalidDataException("Invalid terminal cursor.");
+            CursorVisible = reader.ReadBoolean(); CursorShape = reader.ReadInt32();
+            ApplicationCursor = reader.ReadBoolean(); BracketedPaste = reader.ReadBoolean(); bool isAlternate = reader.ReadBoolean();
+            Title = reader.ReadString(); LastAlternateText = reader.ReadString();
+            int count = reader.ReadInt32();
+            if (count < 0 || count > 512 || (isAlternate && count != 0)) throw new InvalidDataException("Invalid terminal history.");
+            history.Clear();
+            for (int i = 0; i < count; i++) history.Add(ReadLine(reader));
+            primary = NewPage(); alternate = isAlternate ? NewPage() : null; page = isAlternate ? alternate : primary;
+            for (int i = 0; i < rows; i++) page.Lines[i] = ReadLine(reader);
+            page.X = x; page.Y = y; Version++;
+        }
+
+        private static ScreenCell[] ReadLine(BinaryReader reader)
+        {
+            int length = reader.ReadInt32();
+            if (length < 2 || length > 500) throw new InvalidDataException("Invalid terminal row width.");
+            var line = new ScreenCell[length];
+            for (int x = 0; x < length; )
+            {
+                int count = reader.ReadInt32();
+                if (count < 1 || count > length - x) throw new InvalidDataException("Invalid terminal cell run.");
+                var cell = new ScreenCell { Text = reader.ReadString(), Width = reader.ReadInt32(), Style = new ScreenStyle {
+                    Foreground = reader.ReadInt32(), Background = reader.ReadInt32(), Bold = reader.ReadBoolean(), Italic = reader.ReadBoolean(),
+                    Underline = reader.ReadBoolean(), Inverse = reader.ReadBoolean() } };
+                if (cell.Width < 0 || cell.Width > 2) throw new InvalidDataException("Invalid glyph width.");
+                for (int i = 0; i < count; i++) line[x++] = cell;
+            }
+            return line;
+        }
         public string GetTranscript()
         {
             var result = new StringBuilder();
