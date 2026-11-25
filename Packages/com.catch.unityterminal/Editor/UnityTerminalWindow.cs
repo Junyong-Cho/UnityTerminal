@@ -818,6 +818,17 @@ namespace UnityTerminal
                 return true;
             }
             interactiveStatus = null;
+            string trimmed = command.Trim();
+            if (string.Equals(trimmed, "clear", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(trimmed, "cls", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(trimmed, "Clear-Host", StringComparison.OrdinalIgnoreCase))
+            {
+                // Redirected PowerShell has no console cursor for Clear-Host to move.
+                // Clear our display and the host buffer without invoking its RawUI.
+                AddCommandHistory(command);
+                ClearTerminalBuffer();
+                return true;
+            }
             string error = "The shell session is not running. Use Restart to start a new session.";
             if (session == null || !session.TrySend(command, out error))
             {
@@ -826,9 +837,6 @@ namespace UnityTerminal
                 return false;
             }
             AddCommandHistory(command);
-            string trimmed = command.Trim();
-            if (string.Equals(trimmed, "clear", StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(trimmed, "cls", StringComparison.OrdinalIgnoreCase)) ClearTerminalBuffer();
             return true;
         }
 
