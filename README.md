@@ -16,6 +16,8 @@ Codex CLI가 설치되어 선택한 셸에서 실행 가능하다면, 기존 명
 
 대화형 화면은 방향키, Tab, Enter, Esc, Ctrl+C, Ctrl+V 붙여넣기, Ctrl+Shift+C 복사와 창 크기 변경을 전달합니다. 마우스로 텍스트를 드래그해 선택하거나 우클릭 메뉴로 복사·붙여넣기할 수 있습니다. `Stop`은 현재 대화형 프로세스와 자식 프로세스를 종료합니다. 일반 명령 입력 모드의 Tab 경로 완성과 히스토리는 유지됩니다.
 
+대화형 화면에서도 마우스 휠로 위·아래를 확인할 수 있습니다. WSL 셸처럼 일반 화면을 사용하는 앱에서는 저장된 출력 기록을 스크롤하며, `Shift+PageUp`·`Shift+PageDown`으로 페이지 이동, `Shift+Home`·`Shift+End`로 처음·최신 출력으로 이동합니다. 문자를 입력하면 최신 출력으로 돌아옵니다. Codex처럼 대체 화면을 사용하는 전체화면 앱에서는 휠을 `PageUp`·`PageDown`으로 전달하므로 앱이 관리하는 기록을 페이지 단위로 이동합니다. 작은 터치패드 움직임도 누적해서 처리합니다.
+
 대화형 화면의 글자·선택 영역·커서·IME 위치는 같은 칸 좌표를 사용합니다. 글자를 가로로 늘리지 않고 고정폭 폰트로 표시하며, 동적 폰트와 표시 스타일은 Unity 재로드 후 다시 생성합니다. 폰트가 사라졌을 때 기본 가변폭 UI 폰트로 바뀌지 않도록 검사합니다. IME 조합 중에는 Unity의 조합 커서를 사용하고, 그 외에는 앱이 지정한 커서 모양·표시 상태·깜박임을 따릅니다. 세션 시작과 화면 크기 변경에서도 같은 칸 크기로 터미널 행·열 수를 계산합니다.
 
 PowerShell과 Codex·WSL 세션은 별도의 숨김 호스트 프로세스에서 실행됩니다. Unity가 C# 코드를 컴파일하고 스크립트를 재로드하는 동안에도 실행과 출력 수집을 계속하며, 재로드 후 창이 같은 프로세스에 자동으로 다시 연결됩니다. 입력 중인 내용, 셸 변수, 화면·커서·스크롤 상태를 유지합니다. 대화형 앱을 종료하지 않아도 변경한 C# 코드가 적용됩니다.
@@ -73,6 +75,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File ./Packages/com.catch.unityte
 PowerShell 7이 설치된 환경에서는 `Tests~/Run-ShellSelectionTests.ps1`로 5.1과 7의 일반/ConPTY 실행 및 한글 입출력을 검사합니다. Unity의 Codex 회귀 검사도 7로 실행하려면 `Temp/RunInteractiveGuiProbe` 파일 내용에 `PowerShell7`을 기록합니다.
 
 세션 유지와 로컬 호스트 검사는 `powershell -NoProfile -ExecutionPolicy Bypass -File ./Packages/com.catch.unityterminal/Tests~/Run-HostTests.ps1`로 실행합니다. 연결이 끊긴 동안의 출력 수집, 같은 프로세스로 재연결, 화면·셸 변수 유지, 미확인 입력의 중복 방지와 종료 시 자식 프로세스 정리를 확인합니다. 임시 실행 파일은 프로젝트 `Temp` 안에 생성하고 검사 후 삭제합니다.
+
+스크롤 검사는 `Tests~/TerminalScrollProbe.cs`를 `Assets/Editor`에 복사하고 `Temp/RunTerminalScrollProbe`를 만든 뒤 **Assets → Refresh**로 시작합니다. 별도 창이나 키보드 입력 없이 출력 기록의 이동 방향과 경계, 터치패드 누적, 키보드 이동과 전체화면 앱의 페이지 입력을 검사합니다. 결과는 `Temp/TerminalScrollProbe.result.txt`에 기록하며, 검사 후 복사한 스크립트를 삭제합니다.
 
 실제 Unity 컴파일 검사는 `Tests~/PersistentSessionReloadProbe.cs`를 `Assets/Editor`에 복사하고 `Temp/RunPersistentSessionProbe`를 만든 뒤 **Assets → Refresh**로 시작합니다. Codex와 Ubuntu WSL에서 임시 C# 파일을 두 번 컴파일하고 프로세스 ID, 입력 중인 한글, PowerShell·Linux 변수가 유지되는지 확인합니다. Codex 입력은 제출하지 않습니다. 결과는 `Temp/PersistentSessionProbe.result.txt`에 저장하며, 검사 후 복사한 스크립트와 `Assets/Editor/TerminalCompileMarker.cs`를 삭제합니다.
 

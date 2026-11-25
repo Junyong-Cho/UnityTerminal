@@ -22,6 +22,8 @@ namespace UnityTerminal
         private int control;
         private bool focusPending = true;
         private int scrollBack;
+        private float scrollRemainder;
+        private bool scrollingApplication;
         private int selectionStart = -1, selectionEnd = -1;
         private int selectionVersion;
         private bool selecting;
@@ -182,7 +184,9 @@ namespace UnityTerminal
             }
             textStyle.fontStyle = FontStyle.Normal;
             textStyle.normal.textColor = new Color(0.65f, 0.65f, 0.65f);
-            GUI.Label(new Rect(4, bounds.height - 19, bounds.width - 8, 19), status ?? "Ctrl+C interrupt   Ctrl+V paste   Ctrl+Shift+C copy", textStyle);
+            string footer = scrollBack > 0 ? "Scrollback " + scrollBack + "/" + screen.HistoryCount + "   Type to return to latest output" :
+                "Ctrl+C interrupt   Ctrl+V paste   Ctrl+Shift+C copy";
+            GUI.Label(new Rect(4, bounds.height - 19, bounds.width - 8, 19), status ?? footer, textStyle);
             GUI.EndClip();
         }
 
@@ -230,8 +234,7 @@ namespace UnityTerminal
             { selecting = false; GUIUtility.hotControl = 0; e.Use(); return true; }
             if (e.type == EventType.ScrollWheel && bounds.Contains(e.mousePosition))
             {
-                scrollBack = Mathf.Clamp(scrollBack + (int)(e.delta.y * 3), 0, screen.HistoryCount);
-                selectionStart = selectionEnd = -1;
+                ScrollWheel(e.delta.y);
                 e.Use(); return true;
             }
             if (control == 0 || GUIUtility.keyboardControl != control) return false;
@@ -256,7 +259,7 @@ namespace UnityTerminal
             Event keyEvent = inputEvent;
             if (keyEvent.type == EventType.KeyUp) { e.Use(); return true; }
             if (keyEvent.type != EventType.KeyDown) return false;
-
+            if (ScrollHistoryKey(keyEvent)) { e.Use(); return true; }
             if ((keyEvent.control || keyEvent.command) && keyEvent.keyCode == KeyCode.V) { Paste(); e.Use(); return true; }
             if ((keyEvent.control || keyEvent.command) && keyEvent.shift && keyEvent.keyCode == KeyCode.C) { Copy(); e.Use(); return true; }
             TerminalKey key = MapKey(keyEvent.keyCode);
@@ -271,8 +274,47 @@ namespace UnityTerminal
 
         private void SendText(string text)
         {
+            scrollRemainder = 0;
             scrollBack = 0; selectionStart = selectionEnd = -1; status = null;
             if (Send != null) Send(text);
+        }
+
+        private void ScrollWheel(float delta)
+        {
+            if (delta == 0 || float.IsNaN(delta) || float.IsInfinity(delta)) return;
+            bool application = screen.Alternate;
+            // Alternate-screen apps own their history. Page keys let the existing app
+            // scroll it without requiring a new host or changing its terminal protocol.
+            float amount = application ? Mathf.Clamp(delta, -1, 1) : delta * 3;
+            if (application != scrollingApplication || (scrollRemainder != 0 && Mathf.Sign(amount) != Mathf.Sign(scrollRemainder)))
+                scrollRemainder = 0;
+            scrollingApplication = application;
+            scrollRemainder += amount;
+            int steps = (int)scrollRemainder;
+            scrollRemainder -= steps;
+            if (steps == 0) return;
+            selectionStart = selectionEnd = -1;
+            if (application)
+                SendText(TerminalInput.Encode(steps < 0 ? TerminalKey.PageUp : TerminalKey.PageDown, '\0', false, false, false, screen.ApplicationCursor));
+            else
+                scrollBack = Mathf.Clamp(scrollBack - steps, 0, screen.HistoryCount);
+        }
+
+        private bool ScrollHistoryKey(Event key)
+        {
+            if (screen.Alternate || !key.shift || key.control || key.alt || key.command) return false;
+            int page = Mathf.Max(1, screen.Rows - 1);
+            switch (key.keyCode)
+            {
+                case KeyCode.PageUp: scrollBack = Mathf.Min(screen.HistoryCount, scrollBack + page); break;
+                case KeyCode.PageDown: scrollBack = Mathf.Max(0, scrollBack - page); break;
+                case KeyCode.Home: scrollBack = screen.HistoryCount; break;
+                case KeyCode.End: scrollBack = 0; break;
+                default: return false;
+            }
+            scrollRemainder = 0;
+            selectionStart = selectionEnd = -1;
+            return true;
         }
 
         private static TerminalKey MapKey(KeyCode key)
