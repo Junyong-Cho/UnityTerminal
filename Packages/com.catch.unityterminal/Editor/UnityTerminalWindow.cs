@@ -648,7 +648,7 @@ namespace UnityTerminal
 
             // Let every control register its real geometry and ID before consuming custom keys.
             // A Used event makes GUILayout return dummy rectangles and may change control IDs.
-            Rect inputRect = GUILayoutUtility.GetRect(new GUIContent(currentInput), inputStyle, GUILayout.ExpandWidth(true));
+            Rect inputRect = GUILayoutUtility.GetRect(new GUIContent(currentInput), inputStyle, GUILayout.ExpandWidth(true), GUILayout.MinWidth(0));
             Event inputEvent = Event.current.type == EventType.KeyDown || Event.current.type == EventType.KeyUp
                 ? new Event(Event.current) : null;
             inputComposition.BeginEvent();
@@ -656,6 +656,10 @@ namespace UnityTerminal
             GUI.SetNextControlName("TerminalInput");
             // Use the same IMGUI TextEditor state as completion and caret updates.
             string newInput = GUI.TextField(inputRect, currentInput, inputStyle);
+            EditorGUI.BeginDisabledGroup(string.IsNullOrWhiteSpace(newInput) || session == null || !session.IsReady);
+            bool runInteractive = GUILayout.Button(new GUIContent("Interactive", "Run this command in an interactive terminal (Ctrl+Enter). Exit or Stop returns to PowerShell."),
+                EditorStyles.miniButton, GUILayout.Width(85));
+            EditorGUI.EndDisabledGroup();
             
             // Filter out any literal tab characters inserted by Unity's TextField to keep currentInput clean
             string cleanInput = newInput.Replace("\t", "");
@@ -668,6 +672,7 @@ namespace UnityTerminal
                 if (composing) Event.current.Use();
                 else HandleKeyboardEvents(inputEvent);
             }
+            if (runInteractive && !composing) SubmitInput(true);
             if (pendingCaret >= 0 && GUI.GetNameOfFocusedControl() == "TerminalInput")
             {
                 TextEditor editor = (TextEditor)GUIUtility.GetStateObject(typeof(TextEditor), GUIUtility.keyboardControl);
@@ -717,14 +722,7 @@ namespace UnityTerminal
                 {
                     if (e.type == EventType.KeyDown)
                     {
-                        if (!string.IsNullOrEmpty(currentInput) && SendCommand(currentInput))
-                        {
-                            currentInput = "";
-                            pendingCaret = 0;
-                            pendingSelection = -1;
-                            completion.Reset();
-                        }
-                        focusInputPending = true;
+                        SubmitInput(e.control || e.command);
                     }
                     Event.current.Use(); // Consume the live event after the input control is registered.
                     Repaint();
@@ -802,9 +800,25 @@ namespace UnityTerminal
             }
         }
 
-        private bool SendCommand(string command)
+        private void SubmitInput(bool forceInteractive)
         {
-            if (TerminalInput.IsCodexCommand(command) || TerminalInput.IsInteractiveWslCommand(command))
+            if (ExecuteCommand(currentInput, forceInteractive))
+            {
+                currentInput = "";
+                pendingCaret = 0;
+                pendingSelection = -1;
+                completion.Reset();
+            }
+            focusInputPending = true;
+            Repaint();
+        }
+
+        private bool SendCommand(string command) { return ExecuteCommand(command, false); }
+
+        private bool ExecuteCommand(string command, bool forceInteractive)
+        {
+            if (string.IsNullOrWhiteSpace(command)) return false;
+            if (forceInteractive || TerminalInput.IsCodexCommand(command) || TerminalInput.IsInteractiveWslCommand(command))
             {
                 if (!StartInteractive(command)) return false;
                 AddCommandHistory(command);

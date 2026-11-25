@@ -14,7 +14,9 @@ CMD·WSL 전용 메뉴는 제공하지 않습니다. 이전에 저장한 선택�
 
 Codex CLI가 설치되어 선택한 셸에서 실행 가능하다면, 기존 명령 입력란에 `codex`를 입력합니다. 같은 창이 대화형 화면으로 전환되고 종료 후 원래 명령 입력란으로 돌아옵니다. `codex resume`, `codex login`, `codex --help`도 같은 방식으로 실행합니다. 로그인과 승인은 Codex 화면에서 직접 진행합니다. 대화형 실행에는 Windows 10 1809 이상이 필요합니다.
 
-대화형 화면은 기본 셸 화면과 분리됩니다. 실행 중에는 기존 셸 프로세스와 기본 출력 버퍼를 유지하며, 종료하거나 `Stop`을 누르면 기존 로그·스크롤·입력 커서·선택 상태로 복귀합니다. Codex 화면의 출력과 정상 종료 메시지는 기본 로그에 합치지 않습니다. 입력란에서 Enter로 실행한 `codex` 명령은 소비되므로 복귀 시 빈 프롬프트가 표시됩니다.
+다른 프로그램도 입력란 옆의 **Interactive** 버튼이나 **Ctrl+Enter**로 대화형 실행할 수 있습니다. 예를 들어 설치된 `claude`, `python -i` 또는 인수를 포함한 실행 경로를 입력한 뒤 이 방법으로 실행하면 됩니다. 특정 프로그램 이름을 추가 등록할 필요가 없으며, 입력한 PowerShell 명령과 따옴표·인수를 그대로 전달합니다. 종료하거나 `Stop`을 누르면 기존 PowerShell로 돌아옵니다. 이 선택은 한 번의 실행에만 적용되므로 다음 명령은 다시 일반 **Enter**로 실행할 수 있습니다. 일반 Enter에서 Codex·WSL을 자동 전환하는 기존 동작도 유지됩니다.
+
+대화형 화면은 기본 셸 화면과 분리됩니다. 실행 중에는 기존 셸 프로세스와 기본 출력 버퍼를 유지하며, 종료하거나 `Stop`을 누르면 기존 로그·스크롤·입력 커서·선택 상태로 복귀합니다. 대화형 화면의 출력과 정상 종료 메시지는 기본 로그에 합치지 않습니다. 입력란에서 실행한 대화형 명령은 소비되므로 복귀 시 빈 프롬프트가 표시됩니다.
 
 대화형 화면은 방향키, Tab, Enter, Esc, Ctrl+C, Ctrl+V 붙여넣기, Ctrl+Shift+C 복사와 창 크기 변경을 전달합니다. 마우스로 텍스트를 드래그해 선택하거나 우클릭 메뉴로 복사·붙여넣기할 수 있습니다. `Stop`은 현재 대화형 프로세스와 자식 프로세스를 종료합니다. 일반 명령 입력 모드의 Tab 경로 완성과 히스토리는 유지됩니다.
 
@@ -74,6 +76,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File ./Packages/com.catch.unityte
 
 실제 Unity 창의 Codex 회귀 검사는 `Tests~/InteractiveTerminalGuiProbe.cs`를 `Assets/Editor`에 복사하고 `Temp/RunInteractiveGuiProbe` 파일을 만든 뒤 **Assets → Refresh**를 실행합니다. 결과는 `Temp/InteractiveGuiProbe.result.txt`에 저장합니다. 읽기 전용 Codex 프롬프트에 문자열을 입력하지만 제출하지 않습니다. `Stop`과 자연 종료 후 기존 셸·로그·스크롤·입력 상태 복원, Enter로 실행한 명령의 소비도 검사합니다. 검사 후 복사한 스크립트를 삭제합니다.
 
+공통 대화형 실행 검사는 `Tests~/GenericInteractiveSessionProbe.cs`를 `Assets/Editor`에 복사하고 `Temp/RunGenericInteractiveProbe`를 만든 뒤 **Assets → Refresh**로 시작합니다. 별도 검사 창에서 실제 Ctrl+Enter·버튼 클릭, 긴 명령과 따옴표, 일반 PowerShell 실행 복귀, 스크립트 재로드 뒤 동일 프로세스·한글 변수 유지를 확인합니다. 결과는 `Temp/GenericInteractiveProbe.result.txt`에 저장하며 검사 후 복사한 스크립트를 삭제합니다. 설치된 Claude CLI의 시작 화면만 확인하려면 `powershell -NoProfile -ExecutionPolicy Bypass -File ./Packages/com.catch.unityterminal/Tests~/Run-GenericCliTests.ps1`를 실행합니다. 이 검사는 작업 프롬프트를 보내거나 로그인·신뢰 승인을 진행하지 않습니다.
+
 PowerShell 7이 설치된 환경에서는 `Tests~/Run-ShellSelectionTests.ps1`로 5.1과 7의 일반/ConPTY 실행 및 한글 입출력을 검사합니다. Unity의 Codex 회귀 검사도 7로 실행하려면 `Temp/RunInteractiveGuiProbe` 파일 내용에 `PowerShell7`을 기록합니다.
 
 세션 유지와 로컬 호스트 검사는 `powershell -NoProfile -ExecutionPolicy Bypass -File ./Packages/com.catch.unityterminal/Tests~/Run-HostTests.ps1`로 실행합니다. 연결이 끊긴 동안의 출력 수집, 같은 프로세스로 재연결, 화면·셸 변수 유지, 미확인 입력의 중복 방지와 종료 시 자식 프로세스 정리를 확인합니다. 임시 실행 파일은 프로젝트 `Temp` 안에 생성하고 검사 후 삭제합니다.
@@ -84,4 +88,4 @@ PowerShell 7이 설치된 환경에서는 `Tests~/Run-ShellSelectionTests.ps1`�
 
 설치된 Ubuntu에서 실제 WSL 검증은 `powershell -NoProfile -ExecutionPolicy Bypass -File ./Packages/com.catch.unityterminal/Tests~/Run-WslTests.ps1`로 실행합니다. 다른 배포판은 `-Distribution 이름`으로 지정합니다. PowerShell에서 배포판 목록 출력, Linux 진입·프로젝트 경로·Tab 완성·한글 전달, 종료 후 기존 PowerShell 유지 여부를 확인합니다. Unity 화면에서 Codex에 이어 WSL 진입·종료도 검사하려면 `Temp/RunInteractiveGuiProbe` 내용에 `PowerShell7+WSL` 또는 `PowerShell+WSL`을 기록합니다. 이 GUI 검사는 Ubuntu를 사용합니다.
 
-대화형 명령은 현재 폴더에서 별도 PowerShell 프로세스로 실행하므로, 일반 입력 모드 셸에서 정의한 임시 변수·함수는 전달되지 않습니다. 대화형 자동 전환 대상은 `codex`와 WSL 대화형 진입 명령입니다. 다른 명령은 기존 표준 스트림 모드를 사용합니다. WSL에서 Codex를 실행하려면 해당 Linux 배포판에도 Codex가 설치되어 있어야 합니다. 일반 입력 모드의 현재 경로 추적은 기본 PowerShell 프롬프트 형식에 의존합니다.
+대화형 명령은 현재 폴더에서 별도 PowerShell 프로세스로 실행하므로, 일반 입력 모드 셸에서 정의한 임시 변수·함수는 전달되지 않습니다. 대화형 자동 전환 대상은 `codex`와 WSL 대화형 진입 명령입니다. 그 외 명령은 일반 Enter로 표준 스트림 실행, Interactive 버튼이나 Ctrl+Enter로 대화형 실행을 선택합니다. WSL에서 Codex·Claude를 실행하려면 해당 Linux 배포판에도 각 CLI가 설치되어 있어야 합니다. 일반 입력 모드의 현재 경로 추적은 기본 PowerShell 프롬프트 형식에 의존합니다.
