@@ -83,7 +83,7 @@ namespace UnityTerminal.Tests
                 "[Console]::WriteLine(('GENERIC-'+'READY')); " +
                 "[Console]::WriteLine(('TTY-'+[Console]::IsInputRedirected)); " +
                 "[Console]::WriteLine(('QUOTED-'+'spaces; and ''quotes'''));";
-            return "powershell.exe -NoLogo -NoProfile -NoExit -Command '" + code.Replace("'", "''") + "'";
+            return "# Multiline launch\npowershell.exe -NoLogo -NoProfile -NoExit -Command '" + code.Replace("'", "''") + "'";
         }
         private void Tick()
         {

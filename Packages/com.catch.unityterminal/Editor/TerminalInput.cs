@@ -120,7 +120,15 @@ namespace UnityTerminal
             string result;
             switch (key)
             {
-                case TerminalKey.Enter: return shift ? "\x1b[13;" + modifier + "u" : alt ? "\x1b\r" : "\r";
+                case TerminalKey.Enter:
+                    if (shift)
+                    {
+                        // ConPTY does not decode CSI-u into console key records. Its Win32
+                        // input sequence preserves Shift for native Windows console apps.
+                        int state = 16 | (alt ? 2 : 0) | (control ? 8 : 0);
+                        return "\x1b[13;28;13;1;" + state + ";1_\x1b[13;28;13;0;" + state + ";1_";
+                    }
+                    return alt ? "\x1b\r" : "\r";
                 case TerminalKey.Backspace: result = "\x7f"; break;
                 case TerminalKey.Tab: return shift ? "\x1b[Z" : "\t";
                 case TerminalKey.Escape: return "\x1b";

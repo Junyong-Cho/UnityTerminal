@@ -2,6 +2,7 @@ using System;
 using System.IO;
 using System.Reflection;
 using System.Text;
+using System.Text.RegularExpressions;
 using UnityEditor;
 using UnityEngine;
 
@@ -33,6 +34,7 @@ namespace UnityTerminal.Tests
         private string stablePrimaryText;
         private double primaryStableSince;
         private int initialColumns, initialRows;
+        private bool multilineStarted;
 
         [InitializeOnLoadMethod]
         private static void Requested()
@@ -182,6 +184,15 @@ namespace UnityTerminal.Tests
                         stage++; break;
                     case 2:
                         if (!ScreenText().Contains("local-input-check-\uD55C\uAE00")) return;
+                        if (!multilineStarted)
+                        {
+                            Press(KeyCode.Return, '\r', EventModifiers.Shift);
+                            foreach (char c in "next-line") Press(KeyCode.None, c, EventModifiers.None);
+                            multilineStarted = true;
+                            break;
+                        }
+                        if (!Regex.IsMatch(ScreenText(), "local-input-check-\uD55C\uAE00[^\\r\\n]*\\r?\\n[^\\r\\n]*next-line")) return;
+                        trace.AppendLine("PASS: Shift+Enter inserts a newline in the real Codex prompt without submitting a task");
                         trace.AppendLine("PASS: typed ASCII and Korean character events reached the real Codex prompt without submission");
                         Press(KeyCode.U, '\0', EventModifiers.Control);
                         GUIUtility.systemCopyBuffer = "paste-\uD55C\uAE00-check";

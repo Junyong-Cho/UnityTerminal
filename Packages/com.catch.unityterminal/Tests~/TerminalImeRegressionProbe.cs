@@ -126,7 +126,7 @@ namespace UnityTerminal.Tests
                     case 3:
                         if (native)
                         {
-                            Require((string)Get("currentInput") == "\uD55C\uAE00", "Native Korean result: " + Get("currentInput"));
+                            Require((string)Get("currentInput") == "\uD55C\uAE00", "Native Korean result: " + Escape((string)Get("currentInput")));
                             object buffer = Get("buffer");
                             Require(!((string)buffer.GetType().GetMethod("GetPlainText").Invoke(buffer, null)).Contains("[System Error]"), "Composition Enter submitted a shell command");
                             trace.AppendLine("PASS: actual Windows Korean IME composes in primary field; Enter only commits");

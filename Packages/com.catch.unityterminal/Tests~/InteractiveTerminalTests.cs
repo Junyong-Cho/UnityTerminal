@@ -137,6 +137,8 @@ namespace UnityTerminal.Tests
                 WaitFor(session, screen, "KEY:Backspace");
                 string text = screen.GetTranscript();
                 Assert(text.Contains("KEY:UpArrow") && text.Contains("KEY:Tab") && text.Contains("KEY:C:3:Control") && text.Contains("KEY:Enter"), "ConPTY did not deliver real console key events: " + text);
+                Send(session, TerminalInput.Encode(TerminalKey.Enter, '\0', true, false, false, false));
+                WaitFor(session, screen, "KEY:Enter:13:Shift");
                 Send(session, TerminalInput.Encode(TerminalKey.PageUp, '\0', false, false, false, false) +
                     TerminalInput.Encode(TerminalKey.PageDown, '\0', false, false, false, false));
                 WaitFor(session, screen, "KEY:PageDown");

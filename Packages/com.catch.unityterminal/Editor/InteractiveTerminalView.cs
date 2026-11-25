@@ -245,6 +245,14 @@ namespace UnityTerminal
                 if (original.type == EventType.ExecuteCommand) { if (original.commandName == "Paste") Paste(); else Copy(); }
                 e.Use(); return true;
             }
+            if (!composing && original.type == EventType.KeyDown && original.shift && !original.control && !original.alt && !original.command &&
+                (original.keyCode == KeyCode.Return || original.keyCode == KeyCode.KeypadEnter))
+            {
+                // Preserve the modified key instead of forwarding a raw return produced
+                // by TextField. Newline-only paste is discarded by some terminal apps.
+                SendText(TerminalInput.Encode(TerminalKey.Enter, '\0', true, false, false, screen.ApplicationCursor));
+                e.Use(); return true;
+            }
             // IME commits can arrive independently of a navigation KeyDown. Never forward
             // composition editing keys (including the Enter that accepts a syllable).
             if (!string.IsNullOrEmpty(committedText) &&

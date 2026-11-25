@@ -460,6 +460,9 @@ namespace UnityTerminal
                 inputStyle.border = new RectOffset(0, 0, 0, 0);
                 inputStyle.margin = new RectOffset(0, 0, 0, 0);
                 inputStyle.padding = new RectOffset(0, 0, 0, 0);
+                inputStyle.fixedHeight = 0;
+                inputStyle.wordWrap = false;
+                inputStyle.alignment = TextAnchor.UpperLeft;
             }
 
             Color inputTextColor = new Color(0.9f, 0.9f, 0.9f);
@@ -648,14 +651,26 @@ namespace UnityTerminal
 
             // Let every control register its real geometry and ID before consuming custom keys.
             // A Used event makes GUILayout return dummy rectangles and may change control IDs.
-            Rect inputRect = GUILayoutUtility.GetRect(new GUIContent(currentInput), inputStyle, GUILayout.ExpandWidth(true), GUILayout.MinWidth(0));
+            float lineHeight = Mathf.Max(fontSize + 2, inputStyle.lineHeight);
+            int lines = 1;
+            foreach (char c in currentInput) if (c == '\n') lines++;
+            float maxHeight = Mathf.Max(lineHeight, Mathf.Min(lineHeight * 8, position.height * 0.4f));
+            Rect inputRect = GUILayoutUtility.GetRect(0, 10000, Mathf.Min(lines * lineHeight, maxHeight),
+                Mathf.Min(lines * lineHeight, maxHeight), GUILayout.ExpandWidth(true));
             Event inputEvent = Event.current.type == EventType.KeyDown || Event.current.type == EventType.KeyUp
                 ? new Event(Event.current) : null;
+            string previousInput = currentInput;
+            int previousCursor = inputCursorIndex, previousSelection = inputSelectIndex;
+            if (GUI.GetNameOfFocusedControl() == "TerminalInput" && GUIUtility.keyboardControl != 0)
+            {
+                var previousEditor = (TextEditor)GUIUtility.GetStateObject(typeof(TextEditor), GUIUtility.keyboardControl);
+                previousCursor = previousEditor.cursorIndex; previousSelection = previousEditor.selectIndex;
+            }
             inputComposition.BeginEvent();
 
             GUI.SetNextControlName("TerminalInput");
             // Use the same IMGUI TextEditor state as completion and caret updates.
-            string newInput = GUI.TextField(inputRect, currentInput, inputStyle);
+            string newInput = GUI.TextArea(inputRect, currentInput, inputStyle);
             EditorGUI.BeginDisabledGroup(string.IsNullOrWhiteSpace(newInput) || session == null || !session.IsReady);
             bool runInteractive = GUILayout.Button(new GUIContent("Interactive", "Run this command in an interactive terminal (Ctrl+Enter). Exit or Stop returns to PowerShell."),
                 EditorStyles.miniButton, GUILayout.Width(85));
@@ -669,8 +684,36 @@ namespace UnityTerminal
             bool composing = inputComposition.ConsumesNavigation(inputEvent ?? Event.current);
             if (inputEvent != null)
             {
-                if (composing) Event.current.Use();
-                else HandleKeyboardEvents(inputEvent);
+                bool returnText = inputEvent.type == EventType.KeyDown && inputEvent.keyCode == KeyCode.None &&
+                    (inputEvent.character == '\r' || inputEvent.character == '\n');
+                if (returnText)
+                {
+                    // IME can emit a separate return character as well as the physical key.
+                    // Physical Enter below owns submission/newline; this is only its text tail.
+                    RemoveControlLineBreak(previousInput);
+                    Event.current.Use();
+                }
+                else if (composing)
+                {
+                    if (inputEvent.type == EventType.KeyDown && IsEnter(inputEvent)) RemoveControlLineBreak(previousInput);
+                    Event.current.Use();
+                }
+                else
+                {
+                    if (inputEvent.type == EventType.KeyDown &&
+                        (IsEnter(inputEvent) || inputEvent.keyCode == KeyCode.Tab || inputEvent.character == '\t') &&
+                        GUI.GetNameOfFocusedControl() == "TerminalInput")
+                    {
+                        // TextArea edits Enter/Tab itself. Apply our key policy once,
+                        // using the selection from before the native control handled the key.
+                        currentInput = previousInput;
+                        var editor = (TextEditor)GUIUtility.GetStateObject(typeof(TextEditor), GUIUtility.keyboardControl);
+                        editor.text = currentInput;
+                        editor.cursorIndex = Mathf.Clamp(previousCursor, 0, currentInput.Length);
+                        editor.selectIndex = Mathf.Clamp(previousSelection, 0, currentInput.Length);
+                    }
+                    HandleKeyboardEvents(inputEvent);
+                }
             }
             if (runInteractive && !composing) SubmitInput(true);
             if (pendingCaret >= 0 && GUI.GetNameOfFocusedControl() == "TerminalInput")
@@ -702,6 +745,8 @@ namespace UnityTerminal
             // Check if input field is focused
             if (GUI.GetNameOfFocusedControl() == "TerminalInput")
             {
+                // Within a multiline draft, the native editor owns vertical caret movement.
+                if (currentInput.IndexOf('\n') >= 0 && (e.keyCode == KeyCode.UpArrow || e.keyCode == KeyCode.DownArrow)) return;
                 // Reset autocomplete if any key other than Tab, UpArrow, DownArrow is pressed
                 if (e.type == EventType.KeyDown)
                 {
@@ -718,11 +763,12 @@ namespace UnityTerminal
                 }
 
                 // 1. Enter Key: Send Command
-                if (e.keyCode == KeyCode.Return || e.keyCode == KeyCode.KeypadEnter)
+                if (IsEnter(e))
                 {
                     if (e.type == EventType.KeyDown)
                     {
-                        SubmitInput(e.control || e.command);
+                        if (e.shift && !e.control && !e.command && !e.alt) InsertInputLineBreak();
+                        else SubmitInput(e.control || e.command);
                     }
                     Event.current.Use(); // Consume the live event after the input control is registered.
                     Repaint();
@@ -798,6 +844,42 @@ namespace UnityTerminal
                 pendingCaret = caret;
                 pendingSelection = -1;
             }
+        }
+
+        private static bool IsEnter(Event e) { return e.keyCode == KeyCode.Return || e.keyCode == KeyCode.KeypadEnter; }
+
+        private void RemoveControlLineBreak(string previousInput)
+        {
+            // TextArea can commit a syllable AND insert Enter. Keep the committed text,
+            // removing only a newline in the newly inserted part, not an existing line.
+            int prefix = 0, suffix = 0;
+            while (prefix < previousInput.Length && prefix < currentInput.Length && previousInput[prefix] == currentInput[prefix]) prefix++;
+            while (suffix < previousInput.Length - prefix && suffix < currentInput.Length - prefix &&
+                previousInput[previousInput.Length - suffix - 1] == currentInput[currentInput.Length - suffix - 1]) suffix++;
+            int end = currentInput.Length - suffix;
+            if (end <= prefix) return;
+            int newline = Mathf.Max(currentInput.LastIndexOf('\n', end - 1, end - prefix), currentInput.LastIndexOf('\r', end - 1, end - prefix));
+            if (newline < 0) return;
+            int count = 1;
+            if (currentInput[newline] == '\n' && newline > prefix && currentInput[newline - 1] == '\r') { newline--; count = 2; }
+            var editor = (TextEditor)GUIUtility.GetStateObject(typeof(TextEditor), GUIUtility.keyboardControl);
+            int cursor = editor.cursorIndex, selection = editor.selectIndex;
+            currentInput = currentInput.Remove(newline, count);
+            editor.text = currentInput;
+            pendingCaret = Mathf.Clamp(cursor > newline ? Mathf.Max(newline, cursor - count) : cursor, 0, currentInput.Length);
+            pendingSelection = Mathf.Clamp(selection > newline ? Mathf.Max(newline, selection - count) : selection, 0, currentInput.Length);
+        }
+
+        private void InsertInputLineBreak()
+        {
+            var editor = (TextEditor)GUIUtility.GetStateObject(typeof(TextEditor), GUIUtility.keyboardControl);
+            int start = Mathf.Clamp(Mathf.Min(editor.cursorIndex, editor.selectIndex), 0, currentInput.Length);
+            int end = Mathf.Clamp(Mathf.Max(editor.cursorIndex, editor.selectIndex), 0, currentInput.Length);
+            currentInput = currentInput.Substring(0, start) + "\n" + currentInput.Substring(end);
+            pendingCaret = start + 1;
+            pendingSelection = -1;
+            historyIndex = -1;
+            completion.Reset();
         }
 
         private void SubmitInput(bool forceInteractive)
