@@ -28,7 +28,6 @@ namespace UnityTerminal.Tests
         private double deadline;
         private IntPtr originalLayout;
         private IMECompositionMode originalMode;
-        private bool retriedHangulMode;
 
         [InitializeOnLoadMethod]
         private static void Requested()
@@ -96,6 +95,13 @@ namespace UnityTerminal.Tests
                 if (EditorApplication.timeSinceStartup > deadline) throw new Exception("IME check timed out");
                 if (!painted || focusedWindow != this) { Focus(); Repaint(); return; }
                 if (native && !EnsureNativeFocus()) { next = EditorApplication.timeSinceStartup + 0.2; return; }
+                if (primeStep >= 0)
+                {
+                    PrimeKoreanMode();
+                    next = EditorApplication.timeSinceStartup + 0.6;
+                    Repaint();
+                    return;
+                }
                 switch (stage++)
                 {
                     case 0:
@@ -107,29 +113,26 @@ namespace UnityTerminal.Tests
                         if (native) EnableKoreanKeyboard();
                         break;
                     case 1:
-                        if (native) { EnableHangulConversion(); SendKoreanKeys(); }
+                        // Priming confirms Hangul composition, then types the real keys.
+                        if (native) { EnableHangulConversion(); BeginPriming(); }
                         break;
                     case 2:
                         if (native)
                         {
-                            if (!sawComposition && !retriedHangulMode)
-                            {
-                                retriedHangulMode = true;
-                                Set("currentInput", ""); Set("pendingCaret", 0);
-                                SendKey(0x15); SendKoreanKeys(); stage--;
-                                break;
-                            }
                             Require(sawComposition, "No native Korean composition was observed");
-                            SendKey(0x0D); // Enter accepts composition; must not submit the command.
+                            SendKey(0x0D); // Korean IME: Enter commits the syllable and submits in one press.
                         }
                         break;
                     case 3:
                         if (native)
                         {
+                            // No shell runs in this window, so a submission shows as [System Error] and keeps the text.
                             Require((string)Get("currentInput") == "\uD55C\uAE00", "Native Korean result: " + Escape((string)Get("currentInput")));
                             object buffer = Get("buffer");
-                            Require(!((string)buffer.GetType().GetMethod("GetPlainText").Invoke(buffer, null)).Contains("[System Error]"), "Composition Enter submitted a shell command");
-                            trace.AppendLine("PASS: actual Windows Korean IME composes in primary field; Enter only commits");
+                            string log = (string)buffer.GetType().GetMethod("GetPlainText").Invoke(buffer, null);
+                            Require(log.Contains("[System Error]"), "One Enter after a Korean commit did not submit");
+                            Require(log.IndexOf("[System Error]") == log.LastIndexOf("[System Error]"), "Korean commit Enter submitted twice");
+                            trace.AppendLine("PASS: actual Windows Korean IME composes in primary field; one Enter commits and submits once");
                         }
                         WindowType.GetMethod("RestoreInputMethod", Private).Invoke(this, null);
                         Require(UnityEngine.Input.imeCompositionMode == originalMode, "IME mode was not restored");
@@ -142,23 +145,23 @@ namespace UnityTerminal.Tests
                         Require(sent.ToString() == "\u314E\uD55C\uAE00", "Interactive field dropped or duplicated characters: " + sent);
                         trace.AppendLine("PASS: interactive field enables IME and sends Korean commits exactly once");
                         sent.Length = 0; sawComposition = false;
-                        if (native) SendKoreanKeys();
+                        if (native) BeginPriming();
                         break;
                     case 5:
                         if (native)
                         {
                             Require(sawComposition, "Interactive input did not receive native composition");
-                            SendKey(0x0D);
+                            SendKey(0x0D); // Korean IME: Enter commits the syllable and is forwarded once.
                         }
                         break;
                     default:
                         if (native)
                         {
-                            Require(sent.ToString() == "\uD55C\uAE00", "Native interactive commits or Enter leaked: " + Escape(sent.ToString()));
-                            trace.AppendLine("PASS: actual Windows Korean IME commits exactly once without forwarding composition Enter");
+                            Require(sent.ToString() == "\uD55C\uAE00\r", "Native interactive Korean commit + Enter: " + Escape(sent.ToString()));
+                            trace.AppendLine("PASS: actual Windows Korean IME commits once and one Enter is forwarded once");
                             SendEvent(new Event { type = EventType.KeyDown, keyCode = KeyCode.Return, character = '\r' });
                             SendEvent(new Event { type = EventType.KeyUp, keyCode = KeyCode.Return, character = '\r' });
-                            Require(sent.ToString() == "\uD55C\uAE00\r", "Enter after composition was swallowed or duplicated");
+                            Require(sent.ToString() == "\uD55C\uAE00\r\r", "A later Enter was swallowed or duplicated");
                             trace.AppendLine("PASS: the next Enter is forwarded normally after composition");
                         }
                         Finish("PASS: Korean input and IME focus lifecycle" + (native ? " including native keyboard composition" : " (native IME not requested)"));
@@ -208,6 +211,65 @@ namespace UnityTerminal.Tests
             finally { ImmReleaseContext(window, context); }
         }
         private void SendKoreanKeys() { foreach (char c in "GKSRMF") SendKey(c); }
+
+        // Right after switching layouts the IME may still be in Latin mode for the first key
+        // (G -> "g", then the rest composes: "gㅏㄴ글"). Before the real input, type a priming G and
+        // require the composition "ㅎ"; cancel it with Backspace and clear the field. A Latin commit
+        // toggles Hangul mode and retries. Not reaching Hangul mode ends as NOT READY (environment),
+        // separate from a product FAIL.
+        private const int MaxPrimeAttempts = 4;
+        private int primeStep = -1;
+        private int primeAttempts;
+
+        private void BeginPriming() { primeStep = 0; primeAttempts = 0; }
+
+        private void PrimeKoreanMode()
+        {
+            switch (primeStep)
+            {
+                case 0:
+                    ClearProbeInput();
+                    SendKey('G');
+                    primeStep = 1;
+                    return;
+                case 1:
+                    string composition = UnityEngine.Input.compositionString;
+                    if (composition == "ㅎ")
+                    {
+                        SendKey(0x08); // Backspace removes the priming jamo without committing it.
+                        trace.AppendLine("Korean IME ready after " + (primeAttempts + 1) + " priming attempt(s)");
+                        primeStep = 2;
+                        return;
+                    }
+                    primeAttempts++;
+                    string committed = interactive ? sent.ToString() : (string)Get("currentInput");
+                    trace.AppendLine("Korean IME not ready (attempt " + primeAttempts + "): composition=[" + composition + "] committed=[" + Escape(committed) + "]");
+                    if (primeAttempts >= MaxPrimeAttempts) { NotReady("Korean IME did not enter Hangul composition mode"); return; }
+                    if (composition.Length > 0) SendKey(0x08);
+                    else if (committed.IndexOf('g') >= 0 || committed.IndexOf('G') >= 0) SendKey(0x15); // Latin mode: toggle Hangul.
+                    primeStep = 0;
+                    return;
+                default:
+                    Require(UnityEngine.Input.compositionString.Length == 0, "Priming composition was not cancelled");
+                    ClearProbeInput();
+                    sawComposition = false;
+                    primeStep = -1;
+                    SendKoreanKeys();
+                    return;
+            }
+        }
+
+        private void ClearProbeInput()
+        {
+            if (interactive == true) sent.Length = 0;
+            else { Set("currentInput", ""); Set("pendingCaret", 0); }
+        }
+
+        private void NotReady(string reason)
+        {
+            primeStep = -1;
+            Finish("NOT READY: " + reason + " (test environment, not a product result)");
+        }
         private static bool EnsureNativeFocus()
         {
             uint foregroundPid;

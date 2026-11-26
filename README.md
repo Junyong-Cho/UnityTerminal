@@ -10,7 +10,7 @@ Unity Package Manager의 **Add package from git URL**에 위 주소를 입력하
 
 CMD·WSL 전용 메뉴는 제공하지 않습니다. 이전에 저장한 선택이 CMD 또는 WSL이면 설치된 PowerShell 7, 없으면 5.1로 시작합니다. WSL과 배포판이 설치되어 있다면 PowerShell 입력란에서 `wsl` 또는 `wsl -d Ubuntu`를 실행합니다. 같은 창이 Linux 대화형 화면으로 전환되며 `exit`하면 기존 PowerShell 화면으로 돌아옵니다. Linux의 경로·Tab 완성·히스토리는 Linux 셸이 처리합니다. `wsl --list`, `wsl --status`, `wsl uname -a` 같은 조회·단발성 명령은 기본 PowerShell 화면에 결과를 표시합니다. `wsl -e bash`, `wsl -e codex`처럼 알려진 셸이나 Codex를 직접 실행하는 경우에도 대화형 화면을 사용합니다. 변수·파이프라인·리디렉션을 포함한 PowerShell 식은 기본 셸에서 그대로 처리합니다.
 
-일반 입력란과 대화형 입력란은 포커스가 있을 때 한글 IME를 활성화하며, 포커스를 잃으면 이전 IME 설정을 복원합니다. 조합 중의 방향키·Backspace·Tab·Enter는 조합 편집에 사용하고, 조합을 확정하는 Enter는 명령 제출로 전달하지 않습니다. 조합 확정 후 Enter를 한 번 더 누르면 명령을 제출합니다.
+일반 입력란과 대화형 입력란은 포커스가 있을 때 한글 IME를 활성화하며, 포커스를 잃으면 이전 IME 설정을 복원합니다. 조합 중의 방향키·Backspace·Tab은 조합 편집에 사용합니다. 한글 조합 중 Enter를 누르면 마지막 글자를 확정하고 바로 명령을 제출하므로 Enter는 한 번이면 됩니다. 대화형 화면에서도 확정한 글자와 Enter를 한 번씩 앱에 전달합니다. 일본어·중국어처럼 Enter로 변환 후보를 확정하는 IME에서는 확정하는 Enter를 명령 제출로 전달하지 않으며, 확정 후 Enter를 한 번 더 누르면 제출합니다.
 
 일반 PowerShell 입력란에서 단독으로 입력한 `clear`·`cls`·`Clear-Host`는 Unity 출력 기록을 지웁니다. 콘솔 핸들이 없는 리디렉션 셸에서 `Clear-Host`가 커서 위치를 바꾸며 발생시키는 예외를 피하도록 처리하며, 실행 중인 셸과 변수는 유지합니다. WSL 같은 대화형 화면 안의 명령은 해당 앱이 처리합니다.
 
@@ -18,7 +18,7 @@ Codex CLI가 설치되어 선택한 셸에서 실행 가능하다면, 기존 명
 
 다른 프로그램도 입력란 옆의 **Interactive** 버튼이나 **Ctrl+Enter**로 대화형 실행할 수 있습니다. 예를 들어 설치된 `claude`, `python -i` 또는 인수를 포함한 실행 경로를 입력한 뒤 이 방법으로 실행하면 됩니다. 특정 프로그램 이름을 추가 등록할 필요가 없으며, 입력한 PowerShell 명령과 따옴표·인수를 그대로 전달합니다. 종료하거나 `Stop`을 누르면 기존 PowerShell로 돌아옵니다. 이 선택은 한 번의 실행에만 적용되므로 다음 명령은 다시 일반 **Enter**로 실행할 수 있습니다. 일반 Enter에서 Codex·WSL을 자동 전환하는 기존 동작도 유지됩니다.
 
-기본 입력란에서는 **Shift+Enter**로 줄을 바꾸고, **Enter**로 작성한 명령 전체를 실행합니다. `if`·함수·반복문·here-string처럼 여러 줄로 이어지는 블록도 Enter 한 번으로 실행되며, 블록 안의 빈 줄은 그대로 유지됩니다. 블록에서 정의한 변수와 함수는 이후 명령에서도 사용할 수 있습니다. **Ctrl+Enter**는 여러 줄 내용도 대화형으로 실행합니다. 입력란 높이는 내용에 맞춰 늘어나며, 여러 줄을 작성하는 동안 위·아래 방향키는 줄 사이에서 커서를 이동합니다. 한 줄 입력의 위·아래 히스토리는 기존대로 동작합니다. 한글 조합을 확정하는 Enter는 줄바꿈이나 명령 실행을 겸하지 않습니다. 대화형 화면에서도 Shift+Enter와 일반 Enter를 구분해 앱에 전달하며, 실제 동작은 앱의 키 설정을 따릅니다.
+기본 입력란에서는 **Shift+Enter**로 줄을 바꾸고, **Enter**로 작성한 명령 전체를 실행합니다. `if`·함수·반복문·here-string처럼 여러 줄로 이어지는 블록도 Enter 한 번으로 실행되며, 블록 안의 빈 줄은 그대로 유지됩니다. 블록에서 정의한 변수와 함수는 이후 명령에서도 사용할 수 있습니다. **Ctrl+Enter**는 여러 줄 내용도 대화형으로 실행합니다. 입력란 높이는 내용에 맞춰 늘어나며, 여러 줄을 작성하는 동안 위·아래 방향키는 줄 사이에서 커서를 이동합니다. 한 줄 입력의 위·아래 히스토리는 기존대로 동작합니다. 한글 조합 중 Enter는 마지막 글자 확정과 명령 실행을 한 번에 처리합니다. 대화형 화면에서도 Shift+Enter와 일반 Enter를 구분해 앱에 전달하며, 실제 동작은 앱의 키 설정을 따릅니다.
 
 대화형 화면은 기본 셸 화면과 분리됩니다. 실행 중에는 기존 셸 프로세스와 기본 출력 버퍼를 유지하며, 종료하거나 `Stop`을 누르면 기존 로그·스크롤·입력 커서·선택 상태로 복귀합니다. 대화형 화면의 출력과 정상 종료 메시지는 기본 로그에 합치지 않습니다. 입력란에서 실행한 대화형 명령은 소비되므로 복귀 시 빈 프롬프트가 표시됩니다.
 
@@ -67,7 +67,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File ./Packages/com.catch.unityte
 
 실제 IMGUI 입력 회귀 검사는 `Tests~/TerminalInputRegressionProbe.cs`를 프로젝트의 `Assets/Editor`에 복사한 뒤, 빈 파일 `Temp/RunTerminalInputProbe`를 만들고 Unity의 **Assets → Refresh**를 실행합니다. 임시 창에서 Tab 자동완성, 후보 순환, 이어 쓰기, 후보가 없는 Tab의 입력 영역과 선택 상태를 검사합니다. 결과는 `Temp/TerminalInputProbe.result.txt`에 저장하며 셸은 실행하지 않습니다. 검사 후 `Assets/Editor`에 복사한 스크립트를 삭제합니다.
 
-한글 입력 검사는 `Tests~/TerminalImeRegressionProbe.cs`를 `Assets/Editor`에 복사하고 `Temp/RunTerminalImeProbe` 파일을 만든 뒤 **Assets → Refresh**를 실행합니다. 기본 검사는 두 입력란의 한국어 문자 이벤트와 IME 활성화·복원을 확인합니다. 파일 내용이 `native`이면 Windows에 설치된 한국어 키보드로 실제 조합과 Enter 확정도 검사합니다. 격리된 임시 창에만 키를 입력하고 셸 명령은 실행하지 않습니다. 결과는 `Temp/TerminalImeProbe.result.txt`에 저장하며 검사 후 복사한 스크립트를 삭제합니다.
+한글 입력 검사는 `Tests~/TerminalImeRegressionProbe.cs`를 `Assets/Editor`에 복사하고 `Temp/RunTerminalImeProbe` 파일을 만든 뒤 **Assets → Refresh**를 실행합니다. 기본 검사는 두 입력란의 한국어 문자 이벤트와 IME 활성화·복원을 확인합니다. 파일 내용이 `native`이면 Windows에 설치된 한국어 키보드로 실제 조합과, Enter 한 번으로 확정과 제출이 한 번씩만 일어나는지도 검사합니다. 본 입력 전에 준비 키로 한글 조합 상태를 확인하고, 영문으로 입력되면 한/영을 전환해 최대 4회까지 다시 시도합니다. 끝내 한글 조합 상태가 되지 않으면 결과를 `NOT READY`로 기록해 제품 실패(`FAIL`)와 구분합니다. 격리된 임시 창에만 키를 입력하고 셸 명령은 실행하지 않습니다. 결과는 `Temp/TerminalImeProbe.result.txt`에 저장하며 검사 후 복사한 스크립트를 삭제합니다.
 
 대화형 표시 검사는 `Tests~/TerminalLayoutRegressionProbe.cs`를 `Assets/Editor`에 복사하고 `Temp/RunTerminalLayoutProbe` 파일을 만든 뒤 **Assets → Refresh**를 실행합니다. 실제 Unity 폰트와 입력 컨트롤로 긴 영문·한글 혼합 행의 끝, 커서와 IME 좌표, 마우스 칸 판정, 커서 모양, 글꼴 크기 변경과 창 크기 변경을 검사합니다. 결과는 `Temp/TerminalLayoutProbe.result.txt`에 저장하며 검사 후 복사한 스크립트를 삭제합니다.
 
