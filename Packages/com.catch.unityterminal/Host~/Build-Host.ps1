@@ -2,6 +2,8 @@ param([Parameter(Mandatory=$true)][string]$OutputPath)
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
 $editor = Join-Path $PSScriptRoot '../Editor'
+# Always runs under Windows PowerShell 5.1, so Add-Type compiles C# 5 only.
+# Keep this list in sync with the cache-key list in Editor/HostedTerminalSession.cs.
 $sources = @('ShellSession.cs', 'ShellCatalog.cs', 'ConPtySession.cs', 'TerminalScreen.cs', 'TerminalBuffer.cs', 'AnsiParser.cs', 'TerminalHostProtocol.cs') |
     ForEach-Object { Join-Path $editor $_ }
 $sources += Join-Path $PSScriptRoot 'TerminalSessionHost.cs'

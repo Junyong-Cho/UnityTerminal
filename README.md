@@ -4,6 +4,8 @@
 
 Unity Package Manager의 **Add package from git URL**에 위 주소를 입력하고, **Window → Terminal**에서 엽니다. 셸 메뉴는 Windows PowerShell 5.1과 PowerShell 7을 제공합니다.
 
+**검증 환경:** Unity 6000.3.28f1, Windows 11. `package.json`에 적힌 최소 버전(2020.3)은 사용 API가 존재하는지만 확인했으며, 한글 입력과 재컴파일 후 세션 복원 같은 동작은 해당 버전에서 아직 검사하지 않았습니다.
+
 셸 메뉴에서 **Windows PowerShell 5.1**과 **PowerShell 7**을 구분해 선택할 수 있습니다. 창을 열 때 PowerShell 7을 확인하며, 실제로 실행 가능한 7 버전이 있을 때만 선택지가 표시됩니다. 저장된 선택이 없으면 **7을 우선 사용하고, 없으면 5.1로 시작**합니다. 직접 선택한 셸은 유지하며, 저장된 7 버전을 찾지 못하면 해당 실행에서는 5.1로 복귀합니다. 일반 명령과 Codex 실행 모두 선택한 버전을 사용합니다. 설치 상태가 바뀌면 터미널 창을 다시 열어 갱신합니다.
 
 CMD·WSL 전용 메뉴는 제공하지 않습니다. 이전에 저장한 선택이 CMD 또는 WSL이면 설치된 PowerShell 7, 없으면 5.1로 시작합니다. WSL과 배포판이 설치되어 있다면 PowerShell 입력란에서 `wsl` 또는 `wsl -d Ubuntu`를 실행합니다. 같은 창이 Linux 대화형 화면으로 전환되며 `exit`하면 기존 PowerShell 화면으로 돌아옵니다. Linux의 경로·Tab 완성·히스토리는 Linux 셸이 처리합니다. `wsl --list`, `wsl --status`, `wsl uname -a` 같은 조회·단발성 명령은 기본 PowerShell 화면에 결과를 표시합니다. `wsl -e bash`, `wsl -e codex`처럼 알려진 셸이나 Codex를 직접 실행하는 경우에도 대화형 화면을 사용합니다. 변수·파이프라인·리디렉션을 포함한 PowerShell 식은 기본 셸에서 그대로 처리합니다.
@@ -29,6 +31,8 @@ Codex CLI가 설치되어 선택한 셸에서 실행 가능하다면, 기존 명
 PowerShell과 Codex·WSL 세션은 별도의 숨김 호스트 프로세스에서 실행됩니다. Unity가 C# 코드를 컴파일하고 스크립트를 재로드하는 동안에도 실행과 출력 수집을 계속하며, 재로드 후 창이 같은 프로세스에 자동으로 다시 연결됩니다. 입력 중인 내용, 셸 변수, 화면·커서·스크롤 상태를 유지합니다. 대화형 앱을 종료하지 않아도 변경한 C# 코드가 적용됩니다.
 
 처음 실행할 때 Windows 기본 제공 PowerShell과 .NET Framework 컴파일러로 호스트를 빌드하고 `Library/UnityTerminal/Host`에 캐시합니다. 별도 SDK 설치나 다운로드는 필요하지 않으며, 통신은 현재 Windows 사용자만 접근 가능한 로컬 명명된 파이프를 사용합니다. `Stop`은 현재 대화형 앱을 종료하고, `Restart`·셸 변경·터미널 창 닫기는 해당 창의 전체 세션을 종료합니다. Unity 종료 시에도 호스트와 프로세스 트리를 정리합니다. Unity를 완전히 종료한 뒤의 세션 복원은 지원하지 않습니다.
+
+**호스트 빌드 제약:** 호스트는 `Host~/Build-Host.ps1`이 Windows PowerShell 5.1(`powershell.exe`)의 `Add-Type`으로 컴파일합니다. 터미널에서 PowerShell 7을 선택해도 빌드는 항상 5.1로 하며, 이 컴파일러는 **C# 5 문법까지만** 지원합니다. 따라서 호스트와 공유하는 `ShellSession.cs`, `ShellCatalog.cs`, `ConPtySession.cs`, `TerminalScreen.cs`, `TerminalBuffer.cs`, `AnsiParser.cs`, `TerminalHostProtocol.cs`와 `Host~/TerminalSessionHost.cs`에는 문자열 보간(`$"..."`), `?.`·`??=`, `nameof`, 식 본문 멤버, 패턴 매칭 같은 C# 6 이후 문법을 쓰면 안 됩니다. `async`/`await`는 사용할 수 있습니다. Unity 쪽 컴파일은 성공하고 호스트 빌드만 실패하므로, 공유 파일을 고친 뒤에는 터미널 창을 다시 열어 호스트가 새로 빌드되는지 확인합니다. 공유 파일을 추가하거나 빼면 `Build-Host.ps1`의 컴파일 목록과 `Editor/HostedTerminalSession.cs`의 캐시 해시 목록을 **함께** 수정합니다. 해시 목록에서 빠진 파일은 내용이 바뀌어도 캐시된 예전 호스트가 계속 쓰입니다.
 
 실제 기능은 `Packages/com.catch.unityterminal/Editor`에 있습니다.
 

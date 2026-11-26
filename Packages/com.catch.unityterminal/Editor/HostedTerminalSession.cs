@@ -16,6 +16,8 @@ namespace UnityTerminal
         {
             var package = PackageInfo.FindForAssembly(typeof(UnityTerminalWindow).Assembly);
             string root = package != null ? package.resolvedPath : Path.GetFullPath(Path.Combine(Application.dataPath, "../Packages/com.catch.unityterminal"));
+            // Host cache key. Must list every file Host~/Build-Host.ps1 compiles (plus the script itself);
+            // a file missing here leaves a stale cached host after that file changes.
             string[] sources = { "Editor/ShellSession.cs", "Editor/ShellCatalog.cs", "Editor/ConPtySession.cs", "Editor/TerminalScreen.cs", "Editor/TerminalBuffer.cs",
                 "Editor/AnsiParser.cs", "Editor/TerminalHostProtocol.cs", "Host~/TerminalSessionHost.cs", "Host~/Build-Host.ps1" };
             string hash;
