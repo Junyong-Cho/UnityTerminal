@@ -8,9 +8,13 @@ using UnityEngine;
 // Unity's Auto Refresh only runs when the editor regains focus. This watches Assets/ and Packages/
 // and refreshes (and therefore compiles) while the editor is in the background. When the editor is
 // focused, Unity's own Auto Refresh handles changes, so this stays idle.
+// Off by default. Toggle with Tools > Background Auto Refresh; the choice is a per-project user setting
+// stored in UserSettings/EditorUserSettings.asset, which .gitignore keeps out of the repository.
 [InitializeOnLoad]
 internal static class BackgroundAutoRefresh
 {
+    private const string MenuPath = "Tools/Background Auto Refresh";
+    private const string EnabledKey = "BackgroundAutoRefresh.Enabled";
     private const long QuietTicks = TimeSpan.TicksPerMillisecond * 500;
     private const int WatcherBufferSize = 64 * 1024;
     private const long RetryTicks = TimeSpan.TicksPerSecond * 2;
@@ -21,14 +25,55 @@ internal static class BackgroundAutoRefresh
     // Main thread only.
     private static long nextRetryTicks;
     private static bool failureLogged;
+    private static bool enabled;
 
     static BackgroundAutoRefresh()
     {
         // Asset import worker processes also run [InitializeOnLoad]; only the main editor should watch.
         if (AssetDatabase.IsAssetImportWorkerProcess() == true) return;
+        // Off unless this user turned it on for this project.
+        enabled = EditorUserSettings.GetConfigValue(EnabledKey) == "true";
         EditorApplication.update += Tick;
         AssemblyReloadEvents.beforeAssemblyReload += Shutdown;
         EditorApplication.quitting += Shutdown;
+        if (enabled == true) StartWatching();
+    }
+
+    [MenuItem(MenuPath, false, 1000)]
+    private static void ToggleMenu()
+    {
+        SetEnabled(enabled == false);
+    }
+
+    [MenuItem(MenuPath, true)]
+    private static bool ToggleMenuValidate()
+    {
+        Menu.SetChecked(MenuPath, enabled);
+        return AssetDatabase.IsAssetImportWorkerProcess() == false;
+    }
+
+    private static void SetEnabled(bool value)
+    {
+        if (enabled == value) return;
+        enabled = value;
+        EditorUserSettings.SetConfigValue(EnabledKey, value == true ? "true" : "false");
+        if (value == true)
+        {
+            StartWatching();
+            // Changes made while switched off were not seen: refresh once if the editor goes to the background.
+            MarkPending();
+        }
+        else
+        {
+            DisposeWatchers();
+            Interlocked.Exchange(ref watcherFailed, 0);
+            Interlocked.Exchange(ref pending, 0);
+        }
+        Debug.Log("Background Auto Refresh " + (value == true ? "enabled." : "disabled."));
+    }
+
+    private static void StartWatching()
+    {
         if (TryCreateWatchers() == false) ScheduleRetry();
     }
 
@@ -91,6 +136,7 @@ internal static class BackgroundAutoRefresh
 
     private static void RecoverWatchers()
     {
+        if (enabled == false) return;
         if (Volatile.Read(ref watcherFailed) == 0) return;
         if (DateTime.UtcNow.Ticks < nextRetryTicks) return;
         // Clear first so an error raised by the new watchers is not lost.
@@ -144,6 +190,8 @@ internal static class BackgroundAutoRefresh
 
     private static void Tick()
     {
+        // Late callbacks from watchers disposed by SetEnabled(false) may still set pending.
+        if (enabled == false) return;
         RecoverWatchers();
         if (Volatile.Read(ref pending) == 0) return;
         if (InternalEditorUtility.isApplicationActive == true)
