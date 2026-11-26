@@ -25,7 +25,7 @@ namespace UnityTerminal
         private float scrollRemainder;
         private bool scrollingApplication;
         private int selectionStart = -1, selectionEnd = -1;
-        private int selectionVersion;
+        private ScreenCell[][] selectionLines;
         private bool selecting;
         private string status;
         public Action<string> Send;
@@ -42,7 +42,8 @@ namespace UnityTerminal
             scrollBack = Mathf.Clamp(state.ScrollBack, 0, screen.HistoryCount);
             int last = screen.Columns * screen.Rows - 1;
             selectionStart = Mathf.Clamp(state.SelectionStart, -1, last); selectionEnd = Mathf.Clamp(state.SelectionEnd, -1, last);
-            selectionVersion = screen.Version; selecting = false;
+            selecting = false;
+            if (HasSelection) SnapshotSelection();
         }
 
         internal static Vector2 MeasureCellSize(Font font, int fontSize)
@@ -93,7 +94,9 @@ namespace UnityTerminal
             // A real IMGUI text control handles IME composition and Unicode commits. Only
             // committed text is forwarded; application navigation keys use the captured event.
             inputEvent = Event.current.type == EventType.KeyDown || Event.current.type == EventType.KeyUp ||
-                Event.current.type == EventType.ValidateCommand || Event.current.type == EventType.ExecuteCommand ? new Event(Event.current) : null;
+                Event.current.type == EventType.ValidateCommand || Event.current.type == EventType.ExecuteCommand ||
+                Event.current.type == EventType.MouseDown || Event.current.type == EventType.MouseDrag ||
+                Event.current.type == EventType.MouseUp ? new Event(Event.current) : null;
             if (compositionStyle == null) compositionStyle = new GUIStyle { clipping = TextClipping.Clip, richText = false, wordWrap = false };
             compositionStyle.font = font;
             compositionStyle.fontSize = fontSize;
@@ -134,13 +137,12 @@ namespace UnityTerminal
         private void Paint(bool windowFocused)
         {
             EditorGUI.DrawRect(bounds, Rgb(0x1e1e1e));
-            if (selectionVersion != screen.Version && !selecting) selectionStart = selectionEnd = -1;
             scrollBack = Mathf.Clamp(scrollBack, 0, screen.HistoryCount);
             // BeginClip adds no control ID, so repaint-only drawing cannot shift the input ID.
             GUI.BeginClip(bounds);
             for (int y = 0; y < screen.Rows; y++)
             {
-                ScreenCell[] line = screen.GetLine(y, scrollBack);
+                ScreenCell[] line = SelectionLine(y);
                 for (int x = 0; x < Math.Min(screen.Columns, line.Length); )
                 {
                     ScreenCell cell = line[x];
@@ -177,7 +179,7 @@ namespace UnityTerminal
                 }
             }
             bool blinkingCursor = screen.CursorShape == 0 || screen.CursorShape == 1 || screen.CursorShape == 3 || screen.CursorShape == 5;
-            if (scrollBack == 0 && screen.CursorVisible && windowFocused && GUIUtility.keyboardControl == control &&
+            if (!HasSelection && scrollBack == 0 && screen.CursorVisible && windowFocused && GUIUtility.keyboardControl == control &&
                 Input.compositionString.Length == 0 && (!blinkingCursor || (int)(EditorApplication.timeSinceStartup * 2) % 2 == 0))
             {
                 EditorGUI.DrawRect(GetCursorPaintRect(), new Color(0.8f, 0.8f, 0.8f, 0.45f));
@@ -185,7 +187,7 @@ namespace UnityTerminal
             textStyle.fontStyle = FontStyle.Normal;
             textStyle.normal.textColor = new Color(0.65f, 0.65f, 0.65f);
             string footer = scrollBack > 0 ? "Scrollback " + scrollBack + "/" + screen.HistoryCount + "   Type to return to latest output" :
-                "Ctrl+C interrupt   Ctrl+V paste   Ctrl+Shift+C copy";
+                HasSelection ? "Ctrl+C / Ctrl+Shift+C copy   Right-click for Copy" : "Ctrl+C interrupt   Ctrl+V paste   Ctrl+Shift+C copy";
             GUI.Label(new Rect(4, bounds.height - 19, bounds.width - 8, 19), status ?? footer, textStyle);
             GUI.EndClip();
         }
@@ -209,29 +211,31 @@ namespace UnityTerminal
         public bool HandleInput()
         {
             Event e = Event.current;
-            if (e.type == EventType.MouseDown && bounds.Contains(e.mousePosition))
+            // The IME TextField may consume mouse events before this handler runs.
+            Event mouse = inputEvent ?? e;
+            if (mouse.type == EventType.MouseDown && bounds.Contains(mouse.mousePosition))
             {
                 GUIUtility.keyboardControl = control;
-                if (e.button == 1)
+                if (mouse.button == 1)
                 {
                     var menu = new GenericMenu();
                     menu.AddItem(new GUIContent("Copy"), false, Copy);
                     menu.AddItem(new GUIContent("Paste"), false, Paste);
                     menu.ShowAsContext();
                 }
-                else if (e.button == 0)
+                else if (mouse.button == 0)
                 {
-                    selectionVersion = screen.Version;
-                    selectionStart = selectionEnd = CellAt(e.mousePosition);
+                    SnapshotSelection();
+                    selectionStart = selectionEnd = CellAt(mouse.mousePosition);
                     selecting = true;
                     GUIUtility.hotControl = control;
                 }
                 e.Use(); return true;
             }
-            if (selecting && e.type == EventType.MouseDrag)
-            { selectionEnd = CellAt(e.mousePosition); e.Use(); return true; }
-            if (selecting && e.type == EventType.MouseUp)
-            { selecting = false; GUIUtility.hotControl = 0; e.Use(); return true; }
+            if (selecting && mouse.type == EventType.MouseDrag)
+            { selectionEnd = CellAt(mouse.mousePosition); e.Use(); return true; }
+            if (selecting && mouse.type == EventType.MouseUp)
+            { selecting = false; GUIUtility.hotControl = 0; if (!HasSelection) selectionLines = null; e.Use(); return true; }
             if (e.type == EventType.ScrollWheel && bounds.Contains(e.mousePosition))
             {
                 ScrollWheel(e.delta.y);
@@ -269,7 +273,8 @@ namespace UnityTerminal
             if (keyEvent.type != EventType.KeyDown) return false;
             if (ScrollHistoryKey(keyEvent)) { e.Use(); return true; }
             if ((keyEvent.control || keyEvent.command) && keyEvent.keyCode == KeyCode.V) { Paste(); e.Use(); return true; }
-            if ((keyEvent.control || keyEvent.command) && keyEvent.shift && keyEvent.keyCode == KeyCode.C) { Copy(); e.Use(); return true; }
+            if ((keyEvent.control || keyEvent.command) && keyEvent.keyCode == KeyCode.C && (keyEvent.shift || HasSelection))
+            { Copy(); e.Use(); return true; }
             TerminalKey key = MapKey(keyEvent.keyCode);
             char character = keyEvent.character;
             if (keyEvent.control && character == '\0' && keyEvent.keyCode >= KeyCode.A && keyEvent.keyCode <= KeyCode.Z)
@@ -354,6 +359,20 @@ namespace UnityTerminal
             int y = Mathf.Clamp(Mathf.FloorToInt((mouse.y - bounds.y - 2) / cellHeight), 0, screen.Rows - 1);
             return y * screen.Columns + x;
         }
+        private bool HasSelection { get { return selectionStart >= 0 && selectionStart != selectionEnd; } }
+        private void SnapshotSelection()
+        {
+            // Keep the visible text stable while the app redraws or moves its cursor.
+            // Copy must return the text the user selected, including in scrollback.
+            selectionLines = new ScreenCell[screen.Rows][];
+            for (int y = 0; y < screen.Rows; y++)
+                selectionLines[y] = (ScreenCell[])screen.GetLine(y, scrollBack).Clone();
+        }
+        private ScreenCell[] SelectionLine(int y)
+        {
+            return (selecting || HasSelection) && selectionLines != null && y < selectionLines.Length
+                ? selectionLines[y] : screen.GetLine(y, scrollBack);
+        }
         private bool Selected(int x, int y)
         {
             int cell = y * screen.Columns + x;
@@ -366,7 +385,7 @@ namespace UnityTerminal
             var result = new StringBuilder();
             for (int y = first / screen.Columns; y <= last / screen.Columns; y++)
             {
-                ScreenCell[] line = screen.GetLine(y, scrollBack);
+                ScreenCell[] line = SelectionLine(y);
                 var row = new StringBuilder();
                 for (int x = y == first / screen.Columns ? first % screen.Columns : 0; x <= (y == last / screen.Columns ? last % screen.Columns : screen.Columns - 1); x++)
                     if (x < line.Length && line[x].Width != 0) row.Append(line[x].Text ?? " ");

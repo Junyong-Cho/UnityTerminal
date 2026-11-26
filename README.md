@@ -22,7 +22,7 @@ Codex CLI가 설치되어 선택한 셸에서 실행 가능하다면, 기존 명
 
 대화형 화면은 기본 셸 화면과 분리됩니다. 실행 중에는 기존 셸 프로세스와 기본 출력 버퍼를 유지하며, 종료하거나 `Stop`을 누르면 기존 로그·스크롤·입력 커서·선택 상태로 복귀합니다. 대화형 화면의 출력과 정상 종료 메시지는 기본 로그에 합치지 않습니다. 입력란에서 실행한 대화형 명령은 소비되므로 복귀 시 빈 프롬프트가 표시됩니다.
 
-대화형 화면은 방향키, Tab, Enter, Esc, Ctrl+C, Ctrl+V 붙여넣기, Ctrl+Shift+C 복사와 창 크기 변경을 전달합니다. 마우스로 텍스트를 드래그해 선택하거나 우클릭 메뉴로 복사·붙여넣기할 수 있습니다. `Stop`은 현재 대화형 프로세스와 자식 프로세스를 종료합니다. 일반 명령 입력 모드의 Tab 경로 완성과 히스토리는 유지됩니다.
+대화형 화면은 방향키, Tab, Enter, Esc, Ctrl+C, Ctrl+V 붙여넣기, Ctrl+Shift+C 복사와 창 크기 변경을 전달합니다. 마우스로 텍스트를 드래그해 선택하거나 우클릭 메뉴로 복사·붙여넣기할 수 있습니다. 선택한 글은 앱이 출력을 갱신해도 유지되며, 선택이 있을 때 **Ctrl+C**는 복사하고 선택이 없으면 앱에 중단 신호를 보냅니다. 선택 중에는 선택 당시 화면을 표시하며, 새 입력이나 스크롤·다시 클릭으로 최신 화면으로 돌아갑니다. `Stop`은 현재 대화형 프로세스와 자식 프로세스를 종료합니다. 일반 명령 입력 모드의 Tab 경로 완성과 히스토리는 유지됩니다.
 
 대화형 화면에서도 마우스 휠로 위·아래를 확인할 수 있습니다. WSL 셸처럼 일반 화면을 사용하는 앱에서는 저장된 출력 기록을 스크롤하며, `Shift+PageUp`·`Shift+PageDown`으로 페이지 이동, `Shift+Home`·`Shift+End`로 처음·최신 출력으로 이동합니다. 문자를 입력하면 최신 출력으로 돌아옵니다. Codex처럼 대체 화면을 사용하는 전체화면 앱에서는 휠을 `PageUp`·`PageDown`으로 전달하므로 앱이 관리하는 기록을 페이지 단위로 이동합니다. 작은 터치패드 움직임도 누적해서 처리합니다.
 
@@ -85,6 +85,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File ./Packages/com.catch.unityte
 공통 대화형 실행 검사는 `Tests~/GenericInteractiveSessionProbe.cs`를 `Assets/Editor`에 복사하고 `Temp/RunGenericInteractiveProbe`를 만든 뒤 **Assets → Refresh**로 시작합니다. 별도 검사 창에서 실제 Ctrl+Enter·버튼 클릭, 긴 명령과 따옴표, 일반 PowerShell 실행 복귀, 스크립트 재로드 뒤 동일 프로세스·한글 변수 유지를 확인합니다. 결과는 `Temp/GenericInteractiveProbe.result.txt`에 저장하며 검사 후 복사한 스크립트를 삭제합니다. 설치된 Claude CLI의 시작 화면만 확인하려면 `powershell -NoProfile -ExecutionPolicy Bypass -File ./Packages/com.catch.unityterminal/Tests~/Run-GenericCliTests.ps1`를 실행합니다. 이 검사는 작업 프롬프트를 보내거나 로그인·신뢰 승인을 진행하지 않습니다.
 
 여러 줄 편집 검사는 `Tests~/TerminalMultilineRegressionProbe.cs`를 `Assets/Editor`에 복사하고 `Temp/RunTerminalMultilineProbe`를 만든 뒤 **Assets → Refresh**로 시작합니다. 커서·선택 영역에서의 개행, 입력란 높이, 여러 줄 이동·자동완성, 대화형 Shift+Enter 전달을 확인하고 결과를 `Temp/TerminalMultilineProbe.result.txt`에 저장합니다. `InteractiveTerminalGuiProbe`는 실제 Codex 입력란의 줄바꿈도 제출 없이 확인합니다. Claude 입력란이 준비된 환경에서는 `Run-GenericCliTests.ps1 -CheckNewline`으로 빈 입력란의 줄바꿈만 검사할 수 있으며, 초기 설정·인증이 필요하면 입력 검사를 생략합니다. 검사 후 복사한 스크립트를 삭제합니다.
+
+대화형 드래그·복사 검사는 `Tests~/TerminalCopyRegressionProbe.cs`를 `Assets/Editor`에 복사하고 `Temp/RunTerminalCopyProbe`를 만든 뒤 **Assets → Refresh**로 시작합니다. 별도 테스트 창에서 한글·여러 줄 드래그, 출력 갱신 후 선택 유지, 입력 커서 영역의 드래그, 복사 단축키와 선택이 없을 때의 중단 신호를 검사합니다. 실제 CLI에는 입력을 보내지 않으며 결과는 `Temp/TerminalCopyProbe.result.txt`에 저장합니다. 검사 후 복사한 스크립트를 삭제합니다.
 
 PowerShell 7이 설치된 환경에서는 `Tests~/Run-ShellSelectionTests.ps1`로 5.1과 7의 일반/ConPTY 실행 및 한글 입출력을 검사합니다. Unity의 Codex 회귀 검사도 7로 실행하려면 `Temp/RunInteractiveGuiProbe` 파일 내용에 `PowerShell7`을 기록합니다.
 
