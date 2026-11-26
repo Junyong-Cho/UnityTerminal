@@ -33,6 +33,7 @@ namespace UnityTerminal.Tests
                 Check("failed startup cleans up safely", () => FailedStartup(fixtureDirectory));
                 Check("shell drains trailing stdout and stderr before exit", () => DrainExit(fixtureDirectory));
                 Check("PowerShell round-trips UTF-8 input and output", () => UnicodeRoundTrip(fixtureDirectory));
+                Check("multi-line block runs from one submission and keeps session state", () => MultilineBlock(fixtureDirectory));
                 Check("queue backpressure and repeated disposal", () => Backpressure(fixtureDirectory));
                 Check("restart isolates output and terminates the previous process", () => Restart(fixtureDirectory));
                 Check("cleanup terminates child processes", () => ChildCleanup(fixtureDirectory));
@@ -274,6 +275,22 @@ namespace UnityTerminal.Tests
                 int code;
                 string text = DrainUntilExit(session, out errors, out code);
                 Assert(text.Contains("UTF8-\uD55C\uAE00"), "Unicode input/output was corrupted: " + text);
+                Assert(code == 0, "PowerShell failed");
+            }
+        }
+
+        // One submission of a multi-line block must run without an extra empty line from the user,
+        // keep blank lines inside the block, and leave its variables and functions in the session.
+        private static void MultilineBlock(string directory)
+        {
+            using (var session = ShellSession.Start("PowerShell", directory))
+            {
+                Send(session, "function Get-Joined {\n  $first = 'BLOCK-'\n\n  $first + 'DONE'\n}\nif ($true) {\n  $kept = 41\n}");
+                Send(session, "[Console]::WriteLine((Get-Joined) + ':' + ($kept + 1)); exit 0");
+                string errors;
+                int code;
+                string text = DrainUntilExit(session, out errors, out code);
+                Assert(text.Contains("BLOCK-DONE:42"), "Multi-line block did not run or keep state: " + text + errors);
                 Assert(code == 0, "PowerShell failed");
             }
         }

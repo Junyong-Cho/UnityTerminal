@@ -174,7 +174,12 @@ namespace UnityTerminal
                     error = "The shell session is not running. Use Restart to start a new session.";
                     return false;
                 }
-                input.Write(command + newline);
+                // Redirected PowerShell reads input like its console: a multi-line block (if, function,
+                // loop, here-string) waits at the >> prompt until an empty line, so end multi-line input
+                // with one. Blank lines inside an open block do not end it early.
+                string text = command;
+                if (text.IndexOf('\n') >= 0) text = text.Replace("\r\n", "\n").Replace("\n", newline) + newline;
+                input.Write(text + newline);
                 return true;
             }
             catch (Exception ex)
