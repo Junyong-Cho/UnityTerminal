@@ -532,14 +532,25 @@ namespace UnityTerminal
             UpdateInputMethod();
         }
 
+        private static readonly GUIContent AutoScrollContent = new GUIContent("AutoScroll");
+        private static readonly GUIContent ViewMenuContent = new GUIContent("View", "Font size and AutoScroll");
+        [NonSerialized] private GUIStyle toolbarLabelStyle;
+
         private void DrawToolbar()
         {
+            if (toolbarLabelStyle == null)
+                toolbarLabelStyle = new GUIStyle(EditorStyles.miniLabel) { clipping = TextClipping.Clip, wordWrap = false };
+            bool showStop = interactiveSession != null;
+            float autoScrollWidth = EditorStyles.toolbarButton.CalcSize(AutoScrollContent).x;
+            float viewMenuWidth = EditorStyles.toolbarDropDown.CalcSize(ViewMenuContent).x;
+            TerminalToolbarLayout layout = TerminalToolbarLayout.Compute(position.width, autoScrollWidth, viewMenuWidth, showStop);
+
             EditorGUILayout.BeginHorizontal(EditorStyles.toolbar);
 
             if (shellOptions == null) RefreshShellOptions();
             int currentShell = Math.Max(0, Array.FindIndex(shellOptions, option => option.Id == shellType));
             EditorGUI.BeginDisabledGroup(waitingForShellDiscovery);
-            int newShell = EditorGUILayout.Popup(currentShell, shellLabels, EditorStyles.toolbarDropDown, GUILayout.Width(165));
+            int newShell = EditorGUILayout.Popup(currentShell, shellLabels, EditorStyles.toolbarDropDown, GUILayout.Width(layout.ShellWidth));
             EditorGUI.EndDisabledGroup();
             if (newShell != currentShell)
             {
@@ -548,33 +559,37 @@ namespace UnityTerminal
                 StartShell();
             }
 
-            GUILayout.Space(10);
-
-            // Font size
-            GUILayout.Label("Font Size:", EditorStyles.miniLabel, GUILayout.Width(55));
-            int newFontSize = EditorGUILayout.IntSlider(fontSize, 10, 24, GUILayout.Width(130));
-            if (newFontSize != fontSize)
+            if (layout.CollapseSettings == true)
             {
-                fontSize = newFontSize;
-                EditorPrefs.SetInt("UnityTerminal_FontSize", fontSize);
+                // Reserve the rect before drawing: the button uses the click event, after which
+                // GUILayoutUtility.GetLastRect returns a dummy rect instead of the button's position.
+                Rect viewMenuRect = GUILayoutUtility.GetRect(ViewMenuContent, EditorStyles.toolbarDropDown, GUILayout.Width(viewMenuWidth));
+                if (EditorGUI.DropdownButton(viewMenuRect, ViewMenuContent, FocusType.Passive, EditorStyles.toolbarDropDown))
+                    ShowViewMenu(viewMenuRect);
             }
-
-            GUILayout.Space(10);
-
-            // Auto Scroll
-            bool newAutoScroll = GUILayout.Toggle(autoScroll, "AutoScroll", EditorStyles.toolbarButton);
-            if (newAutoScroll != autoScroll)
+            else
             {
-                autoScroll = newAutoScroll;
-                EditorPrefs.SetBool("UnityTerminal_AutoScroll", autoScroll);
+                GUILayout.Space(TerminalToolbarLayout.Gap);
+
+                // Font size
+                GUILayout.Label("Font Size:", EditorStyles.miniLabel, GUILayout.Width(TerminalToolbarLayout.FontLabelWidth));
+                int newFontSize = EditorGUILayout.IntSlider(fontSize, 10, 24, GUILayout.Width(TerminalToolbarLayout.FontSliderWidth));
+                if (newFontSize != fontSize) SetFontSize(newFontSize);
+
+                GUILayout.Space(TerminalToolbarLayout.Gap);
+
+                // Auto Scroll
+                bool newAutoScroll = GUILayout.Toggle(autoScroll, AutoScrollContent, EditorStyles.toolbarButton, GUILayout.Width(autoScrollWidth));
+                if (newAutoScroll != autoScroll) SetAutoScroll(newAutoScroll);
             }
 
             GUILayout.FlexibleSpace();
 
+            // Status and directory labels shrink (and clip) before any button loses space.
             if (interactiveStatus != null)
-                GUILayout.Label(new GUIContent("Interactive error", interactiveStatus), EditorStyles.miniLabel);
+                GUILayout.Label(new GUIContent("Interactive error", interactiveStatus), toolbarLabelStyle, GUILayout.MinWidth(0));
             if (session != null && !session.IsReady)
-                GUILayout.Label("Connecting...", EditorStyles.miniLabel);
+                GUILayout.Label("Connecting...", toolbarLabelStyle, GUILayout.MinWidth(0));
 
             // Display current folder name (clean UX)
             string displayFolder = "Root";
@@ -586,29 +601,57 @@ namespace UnityTerminal
                     displayFolder = currentWorkingDirectory;
                 }
             }
-            GUILayout.Label($"Dir: {displayFolder}", EditorStyles.miniLabel);
+            GUILayout.Label(new GUIContent("Dir: " + displayFolder, currentWorkingDirectory), toolbarLabelStyle, GUILayout.MinWidth(0));
 
-            GUILayout.Space(10);
+            if (layout.CollapseSettings == false) GUILayout.Space(TerminalToolbarLayout.Gap);
 
             // Clear Log
-            if (GUILayout.Button("Clear", EditorStyles.toolbarButton, GUILayout.Width(50)))
+            if (GUILayout.Button("Clear", EditorStyles.toolbarButton, GUILayout.Width(TerminalToolbarLayout.ClearWidth)))
             {
                 if (interactiveSession != null) SendInteractive("\x0c");
                 else ClearTerminalBuffer();
             }
 
-            if (interactiveSession != null && GUILayout.Button("Stop", EditorStyles.toolbarButton, GUILayout.Width(45)))
+            if (showStop == true && GUILayout.Button("Stop", EditorStyles.toolbarButton, GUILayout.Width(TerminalToolbarLayout.StopWidth)))
                 StopInteractive(null);
 
             // Restart Shell
             EditorGUI.BeginDisabledGroup(waitingForShellDiscovery);
-            if (GUILayout.Button("Restart", EditorStyles.toolbarButton, GUILayout.Width(60)))
+            if (GUILayout.Button("Restart", EditorStyles.toolbarButton, GUILayout.Width(TerminalToolbarLayout.RestartWidth)))
             {
                 StartShell();
             }
             EditorGUI.EndDisabledGroup();
 
             EditorGUILayout.EndHorizontal();
+        }
+
+        // Narrow windows move the font size and AutoScroll settings into this menu.
+        private void ShowViewMenu(Rect anchor)
+        {
+            var menu = new GenericMenu();
+            menu.AddItem(AutoScrollContent, autoScroll, () => SetAutoScroll(!autoScroll));
+            menu.AddSeparator("");
+            for (int size = 10; size <= 24; size++)
+            {
+                int menuSize = size;
+                menu.AddItem(new GUIContent("Font Size/" + menuSize), fontSize == menuSize, () => SetFontSize(menuSize));
+            }
+            menu.DropDown(anchor);
+        }
+
+        private void SetFontSize(int size)
+        {
+            fontSize = Mathf.Clamp(size, 10, 24);
+            EditorPrefs.SetInt("UnityTerminal_FontSize", fontSize);
+            Repaint();
+        }
+
+        private void SetAutoScroll(bool enabled)
+        {
+            autoScroll = enabled;
+            EditorPrefs.SetBool("UnityTerminal_AutoScroll", autoScroll);
+            Repaint();
         }
 
         private void DrawOutputLog()

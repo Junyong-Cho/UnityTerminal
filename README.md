@@ -52,6 +52,7 @@ PowerShell과 Codex·WSL 세션은 별도의 숨김 호스트 프로세스에서
 | `TerminalScreen.cs` | 고정 셀 VT 화면, 커서 이동, 대체 화면, 색상, 터미널 질의 응답 |
 | `TerminalInput.cs` | Codex·WSL 대화형 명령 인식과 터미널 키·붙여넣기 인코딩 |
 | `TerminalComposition.cs` | IME 조합 상태 추적과 조합 확정 키의 중복 전달 방지 |
+| `TerminalToolbarLayout.cs` | 창 너비에 따른 툴바 배치. 좁으면 글꼴 크기·AutoScroll을 View 메뉴로 접고 셸 선택을 줄이며, Clear·Stop·Restart는 항상 표시 |
 | `InteractiveTerminalView.cs` | 대화형 화면 표시, 입력·IME 커밋, 선택과 복사 |
 
 일반 출력 큐는 최대 256개 청크, ConPTY 출력 큐는 128개 청크로 제한하며, 가득 차면 읽기 스레드가 소비를 기다립니다. 호스트는 Unity 연결이 없는 동안에도 출력과 VT 화면을 갱신하며, 창에는 변경된 화면 상태를 압축해 전달합니다. 일반 표시 버퍼는 최대 2,000줄, 전체 262,144자, 한 줄 16,384자를 보관합니다. 대화형 화면의 스크롤 기록은 최대 512줄이며 Tab 후보는 최대 256개입니다.
