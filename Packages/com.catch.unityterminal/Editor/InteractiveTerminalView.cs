@@ -35,15 +35,74 @@ namespace UnityTerminal
 
         public void ResetComposition() { composition.Reset(); }
 
-        [Serializable] internal sealed class ViewState { public int ScrollBack, SelectionStart, SelectionEnd; }
-        internal ViewState CaptureState() { return new ViewState { ScrollBack = scrollBack, SelectionStart = selectionStart, SelectionEnd = selectionEnd }; }
+        [Serializable] internal sealed class ViewState
+        {
+            public int ScrollBack, SelectionStart, SelectionEnd;
+            // The selected screen as it looked when selected. JsonUtility cannot store jagged
+            // arrays, so rows are flattened into SnapshotCells with SnapshotRowLengths.
+            public int SnapshotColumns;
+            public int[] SnapshotRowLengths;
+            public ScreenCell[] SnapshotCells;
+        }
+
+        internal ViewState CaptureState()
+        {
+            var state = new ViewState { ScrollBack = scrollBack, SelectionStart = selectionStart, SelectionEnd = selectionEnd };
+            if (HasSelection == true && selectionLines != null)
+            {
+                int total = 0;
+                foreach (ScreenCell[] line in selectionLines) total += line.Length;
+                state.SnapshotColumns = screen.Columns;
+                state.SnapshotRowLengths = new int[selectionLines.Length];
+                state.SnapshotCells = new ScreenCell[total];
+                int offset = 0;
+                for (int y = 0; y < selectionLines.Length; y++)
+                {
+                    ScreenCell[] line = selectionLines[y];
+                    state.SnapshotRowLengths[y] = line.Length;
+                    Array.Copy(line, 0, state.SnapshotCells, offset, line.Length);
+                    offset += line.Length;
+                }
+            }
+            return state;
+        }
+
         internal void RestoreState(ViewState state)
         {
             scrollBack = Mathf.Clamp(state.ScrollBack, 0, screen.HistoryCount);
             int last = screen.Columns * screen.Rows - 1;
             selectionStart = Mathf.Clamp(state.SelectionStart, -1, last); selectionEnd = Mathf.Clamp(state.SelectionEnd, -1, last);
             selecting = false;
-            if (HasSelection) SnapshotSelection();
+            selectionLines = null;
+            if (HasSelection == false) return;
+            // Rebuilding the snapshot from the current screen would select text that arrived after
+            // the user's selection; without the saved snapshot, drop the selection instead.
+            if (RestoreSnapshot(state) == false) selectionStart = selectionEnd = -1;
+        }
+
+        private bool RestoreSnapshot(ViewState state)
+        {
+            int[] lengths = state.SnapshotRowLengths;
+            ScreenCell[] cells = state.SnapshotCells;
+            if (lengths == null || cells == null) return false;
+            if (state.SnapshotColumns != screen.Columns || lengths.Length != screen.Rows) return false;
+            var lines = new ScreenCell[lengths.Length][];
+            int offset = 0;
+            for (int y = 0; y < lengths.Length; y++)
+            {
+                if (lengths[y] < 0 || offset + lengths[y] > cells.Length) return false;
+                var line = new ScreenCell[lengths[y]];
+                Array.Copy(cells, offset, line, 0, line.Length);
+                // JsonUtility stores a null string as "". "" is real only on wide-glyph continuation
+                // cells (Width 0); elsewhere restore null so Copy and Paint treat the cell as blank.
+                for (int x = 0; x < line.Length; x++)
+                    if (line[x].Width != 0 && line[x].Text == "") line[x].Text = null;
+                lines[y] = line;
+                offset += line.Length;
+            }
+            if (offset != cells.Length) return false;
+            selectionLines = lines;
+            return true;
         }
 
         internal static Vector2 MeasureCellSize(Font font, int fontSize)

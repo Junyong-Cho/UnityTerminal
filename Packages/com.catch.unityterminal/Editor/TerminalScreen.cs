@@ -8,6 +8,8 @@ using System.Text;
 
 namespace UnityTerminal
 {
+    // Serializable so a selection snapshot survives Unity's script reload (JsonUtility).
+    [Serializable]
     internal struct ScreenStyle : IEquatable<ScreenStyle>
     {
         public int Foreground, Background;
@@ -20,6 +22,7 @@ namespace UnityTerminal
         }
     }
 
+    [Serializable]
     internal struct ScreenCell
     {
         public string Text;
