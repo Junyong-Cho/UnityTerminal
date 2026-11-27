@@ -268,6 +268,9 @@ namespace UnityTerminal
                 AppendSystemMessage("\n[System Error] " + error + "\n");
                 Repaint(); return;
             }
+            // While typing or output is flowing, keep the editor loop running: Unity throttles idle updates
+            // (measured gaps up to ~130 ms), which would delay showing an echo the host already returned.
+            if (session != null && session.Connection.RecentlyActive) Repaint();
             int version = buffer.Version;
             if (session != null && session.ApplyBuffer(buffer))
             {

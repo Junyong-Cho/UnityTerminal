@@ -37,6 +37,43 @@ namespace UnityTerminal
         private byte[] pendingBuffer, pendingScreen;
         private string pendingScreenId;
         private int queuedCharacters;
+        // Typing latency. Polling every 33 ms with Windows' default 15.6 ms timer made each key take
+        // ~78 ms to come back (measured with the real host; ConPTY + app took 0.3 ms). For one second after
+        // input or a received change the worker polls every 4 ms with a 1 ms timer resolution
+        // (timeBeginPeriod, released when idle and when the transport ends): ~10 ms per key.
+        private const int FastPollMilliseconds = 4, IdlePollMilliseconds = 33;
+        private const long ActiveTicks = TimeSpan.TicksPerSecond;
+        private long lastActivityTicks;
+        private readonly object timerGate = new object();
+        private bool highResolutionTimer; // guarded by timerGate
+        private readonly Timer highResolutionWatch;
+
+        internal bool RecentlyActive { get { return DateTime.UtcNow.Ticks - Interlocked.Read(ref lastActivityTicks) < ActiveTicks; } }
+
+        private void MarkActivity() { Interlocked.Exchange(ref lastActivityTicks, DateTime.UtcNow.Ticks); }
+
+        // Every timeBeginPeriod is paired with one timeEndPeriod under timerGate, from whichever thread.
+        private void SetHighResolutionTimer(bool enabled)
+        {
+            lock (timerGate)
+            {
+                if (enabled && stopping) enabled = false;
+                if (highResolutionTimer == enabled) return;
+                highResolutionTimer = enabled;
+                if (enabled) timeBeginPeriod(1); else timeEndPeriod(1);
+            }
+        }
+
+        // The worker can block indefinitely while reading a response, so it cannot be relied on to drop the
+        // request when activity ends. This watch releases it within 250 ms of going idle or stopping.
+        private void WatchHighResolutionTimer(object ignored)
+        {
+            if (stopping || RecentlyActive == false) SetHighResolutionTimer(false);
+        }
+
+        [System.Runtime.InteropServices.DllImport("winmm.dll")] private static extern uint timeBeginPeriod(uint period);
+        [System.Runtime.InteropServices.DllImport("winmm.dll")] private static extern uint timeEndPeriod(uint period);
+
         // Diagnostics only: when the last request/response with the host finished, and reconnects so far.
         private DateTime lastExchangeUtc;
         private int reconnects;
@@ -46,6 +83,7 @@ namespace UnityTerminal
             info = options; resumeOnly = resume && options.HostPid != 0;
             if (options.Pending != null) foreach (HostCommand command in options.Pending) { pending.Enqueue(command); queuedCharacters += command.Text.Length; }
             if (pending.Count > 0) drained.Reset();
+            highResolutionWatch = new Timer(WatchHighResolutionTimer, null, 250, 250);
             worker = new Thread(Run) { IsBackground = true, Name = "Unity Terminal host client" };
             worker.Start();
         }
@@ -62,7 +100,7 @@ namespace UnityTerminal
                 text.Append("connection ready=").Append(ready).Append(" stopping=").Append(stopping)
                     .Append(" failure=").Append(failure ?? "-").Append(" reconnects=").Append(reconnects)
                     .Append(" pending=").Append(pending.Count).Append(" inFlight=").Append(inFlight.Count)
-                    .Append(" queuedChars=").Append(queuedCharacters)
+                    .Append(" queuedChars=").Append(queuedCharacters).Append(" fastPoll=").Append(RecentlyActive).Append(" highResTimer=").Append(highResolutionTimer)
                     .Append(" lastExchange=").Append(lastExchangeUtc == default(DateTime) ? "never" : (DateTime.UtcNow - lastExchangeUtc).TotalMilliseconds.ToString("0") + "ms ago");
                 if (state != null)
                     text.Append("\nhost pid=").Append(state.HostPid).Append(" acknowledged=").Append(state.Acknowledged)
@@ -85,7 +123,7 @@ namespace UnityTerminal
                 text = text ?? "";
                 if (queuedCharacters + text.Length > 262144 || pending.Count >= 1024) { error = "Input is full. Try a smaller paste."; return false; }
                 pending.Enqueue(new HostCommand { Kind = kind, Id = id ?? "", Text = text, Columns = columns, Rows = rows });
-                queuedCharacters += text.Length; drained.Reset(); wake.Set(); return true;
+                queuedCharacters += text.Length; drained.Reset(); MarkActivity(); wake.Set(); return true;
             }
         }
         internal bool ApplyBuffer(TerminalBuffer target)
@@ -138,7 +176,9 @@ namespace UnityTerminal
                     retry.Restart();
                     while (!stopping)
                     {
-                        wake.WaitOne(33);
+                        bool active = RecentlyActive;
+                        SetHighResolutionTimer(active);
+                        wake.WaitOne(active ? FastPollMilliseconds : IdlePollMilliseconds);
                         List<HostCommand> commands;
                         lock (gate)
                         {
@@ -157,6 +197,7 @@ namespace UnityTerminal
                         lock (gate) DiscardAcknowledged(update.Acknowledged);
                         if (update.Buffer != null) bufferVersion = update.BufferVersion;
                         if (update.Screen != null) { screenVersion = update.ScreenVersion; screenId = update.InteractiveId; }
+                        if (commands.Count > 0 || update.Buffer != null || update.Screen != null) MarkActivity();
                     }
                 }
                 catch (Exception ex)
@@ -170,6 +211,7 @@ namespace UnityTerminal
                 }
                 finally
                 {
+                    SetHighResolutionTimer(false);
                     NamedPipeClientStream previous;
                     lock (gate) { previous = pipe; pipe = null; }
                     if (previous != null) previous.Dispose();
@@ -271,6 +313,8 @@ namespace UnityTerminal
                 connected = pipe; pipe = null; build = builder;
             }
             wake.Set();
+            highResolutionWatch.Dispose();
+            SetHighResolutionTimer(false);
             if (connected != null) connected.Dispose();
             if (build != null) { try { if (!build.HasExited) KillTree(build.Id); } catch (InvalidOperationException) { } }
             worker.Join(1000);

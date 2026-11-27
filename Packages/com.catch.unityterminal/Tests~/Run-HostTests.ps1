@@ -10,8 +10,10 @@ try {
     $sources = @('ShellCatalog.cs', 'ShellSession.cs', 'ConPtySession.cs', 'TerminalScreen.cs', 'TerminalBuffer.cs', 'AnsiParser.cs', 'TerminalHostProtocol.cs', 'TerminalHostConnection.cs') |
         ForEach-Object { Join-Path $editor $_ }
     $sources += Join-Path $PSScriptRoot 'HostPersistenceTests.cs'
+    $sources += Join-Path $PSScriptRoot 'ConnectionTimerTests.cs'
     Add-Type -Path $sources -ReferencedAssemblies System.dll,System.Core.dll,System.IO.Compression.dll
     [UnityTerminal.Tests.HostPersistenceTests]::Run($hostFile, $probe, $PWD.Path)
+    [UnityTerminal.Tests.ConnectionTimerTests]::Run($PWD.Path)
     # In-process host checks run in their own PowerShell: they compile the host source as a second assembly.
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'Run-HostDiagnosticsTests.ps1')
     if ($LASTEXITCODE -ne 0) { throw 'Host diagnostics tests failed' }
