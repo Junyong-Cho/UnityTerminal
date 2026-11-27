@@ -84,7 +84,13 @@ namespace UnityTerminal
             if (columns < 2 || columns > 500 || rows < 2 || rows > 300) throw new ArgumentOutOfRangeException("Terminal dimensions");
         }
 
-        private ScreenCell Blank() { return new ScreenCell { Text = " ", Width = 1, Style = style }; }
+        // Erased cells take the current colors (background color erase) but not underline, as in xterm.
+        private ScreenCell Blank()
+        {
+            ScreenStyle blank = style;
+            blank.Underline = false;
+            return new ScreenCell { Text = " ", Width = 1, Style = blank };
+        }
         private ScreenCell[] NewLine()
         {
             var line = new ScreenCell[Columns];
@@ -263,7 +269,9 @@ namespace UnityTerminal
                     page.X = Clamp((p.Length > 1 ? Math.Max(1, p[1]) : 1) - 1, 0, Columns - 1); break;
                 case 'J': EraseDisplay(p[0]); break;
                 case 'K': EraseLine(p[0]); break;
-                case 'm': ApplyStyle(p); break;
+                // Only an unprefixed CSI m is SGR. Prefixed forms are other controls: CSI > 4 ; 2 m sets
+                // xterm modifyOtherKeys and CSI ? 4 m queries it; reading them as SGR turned on underline.
+                case 'm': if (raw.Length == 0 || "?><=".IndexOf(raw[0]) < 0) ApplyStyle(p); break;
                 case 's': SaveCursor(); break;
                 case 'u': if (dec) Respond("\x1b[?0u"); else if (!secondary) RestoreCursor(); break;
                 case 'r':

@@ -20,6 +20,7 @@ namespace UnityTerminal.Tests
             Check("all chunk boundaries preserve VT state and Unicode", SplitSequences);
             Check("scroll region, editing, resize and bounded history", Scrolling);
             Check("terminal queries and extended colors", QueriesAndColors);
+            Check("prefixed CSI m is not SGR and erased cells are not underlined", PrefixedSgrAndErase);
             Check("keyboard encoding, paste and Codex command detection", Keyboard);
             Check("WSL prompts use ConPTY while commands and management stay in PowerShell", WslCommands);
             if (native)
@@ -86,6 +87,34 @@ namespace UnityTerminal.Tests
             screen.Feed(new string('\n', 10000));
             Assert(screen.HistoryCount == 512, "Scrollback was not bounded");
         }
+        // Claude Code sends xterm modifyOtherKeys (CSI > 4 ; 2 m / CSI > 4 m). Read as SGR they turned on
+        // underline, and every blank that was erased afterwards showed an underline.
+        private static int UnderlinedCells(TerminalScreen screen)
+        {
+            int count = 0;
+            for (int y = 0; y < screen.Rows; y++)
+                foreach (ScreenCell cell in screen.GetLine(y)) if (cell.Style.Underline) count++;
+            return count;
+        }
+
+        private static void PrefixedSgrAndErase()
+        {
+            foreach (string sequence in new[] { "\x1b[>4;2m", "\x1b[>4;1m", "\x1b[>4m", "\x1b[?4m" })
+            {
+                var screen = new TerminalScreen(20, 3);
+                screen.Feed(sequence + "ab\x1b[K\r\n\x1b[2K\x1b[5X");
+                Assert(UnderlinedCells(screen) == 0, "Prefixed CSI m changed the style: " + sequence.Replace("\x1b", "ESC"));
+                Assert(!screen.GetLine(0)[0].Style.Bold, "Prefixed CSI m set bold: " + sequence.Replace("\x1b", "ESC"));
+            }
+            var underlined = new TerminalScreen(20, 3);
+            underlined.Feed("\x1b[4mA\x1b[K\x1b[24m");
+            Assert(underlined.GetLine(0)[0].Style.Underline, "Real SGR 4 no longer underlines text");
+            Equal("1", UnderlinedCells(underlined).ToString());
+            var background = new TerminalScreen(20, 3);
+            background.Feed("\x1b[4;44m\x1b[K");
+            Assert(background.GetLine(0)[5].Style.Background == TerminalScreen.Palette(4), "Erase lost the current background color");
+        }
+
         private static void QueriesAndColors()
         {
             var screen = new TerminalScreen(30, 10);
