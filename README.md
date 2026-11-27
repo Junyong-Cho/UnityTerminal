@@ -32,6 +32,8 @@ PowerShell과 Codex·WSL 세션은 별도의 숨김 호스트 프로세스에서
 
 처음 실행할 때 Windows 기본 제공 PowerShell과 .NET Framework 컴파일러로 호스트를 빌드하고 `Library/UnityTerminal/Host`에 캐시합니다. 별도 SDK 설치나 다운로드는 필요하지 않으며, 통신은 현재 Windows 사용자만 접근 가능한 로컬 명명된 파이프를 사용합니다. `Stop`은 현재 대화형 앱을 종료하고, `Restart`·셸 변경·터미널 창 닫기는 해당 창의 전체 세션을 종료합니다. Unity 종료 시에도 호스트와 프로세스 트리를 정리합니다. Unity를 완전히 종료한 뒤의 세션 복원은 지원하지 않습니다.
 
+**백그라운드 자동 컴파일:** Unity의 Auto Refresh는 에디터 창으로 돌아올 때만 변경을 가져옵니다. **Tools → Background Auto Refresh**를 켜면 에디터가 백그라운드에 있어도 `Assets`·`Packages`의 변경을 감지해 새로고침과 컴파일을 진행합니다. 기본값은 꺼짐입니다. 켜고 끈 설정은 프로젝트마다 `UserSettings/EditorUserSettings.asset`에 저장되며, 일반적인 Unity `.gitignore`에서는 저장소에 올라가지 않습니다. 에디터가 포커스를 가진 동안, Play 모드, 컴파일·임포트 중에는 동작하지 않으며 Preferences의 Auto Refresh가 꺼져 있으면 따릅니다. `~`로 끝나는 폴더와 `.`으로 시작하는 경로, `.meta` 파일의 변경은 무시합니다.
+
 **호스트 빌드 제약:** 호스트는 `Host~/Build-Host.ps1`이 Windows PowerShell 5.1(`powershell.exe`)의 `Add-Type`으로 컴파일합니다. 터미널에서 PowerShell 7을 선택해도 빌드는 항상 5.1로 하며, 이 컴파일러는 **C# 5 문법까지만** 지원합니다. 따라서 호스트와 공유하는 `ShellSession.cs`, `ShellCatalog.cs`, `ConPtySession.cs`, `TerminalScreen.cs`, `TerminalBuffer.cs`, `AnsiParser.cs`, `TerminalHostProtocol.cs`와 `Host~/TerminalSessionHost.cs`에는 문자열 보간(`$"..."`), `?.`·`??=`, `nameof`, 식 본문 멤버, 패턴 매칭 같은 C# 6 이후 문법을 쓰면 안 됩니다. `async`/`await`는 사용할 수 있습니다. Unity 쪽 컴파일은 성공하고 호스트 빌드만 실패하므로, 공유 파일을 고친 뒤에는 터미널 창을 다시 열어 호스트가 새로 빌드되는지 확인합니다. 공유 파일을 추가하거나 빼면 `Build-Host.ps1`의 컴파일 목록과 `Editor/HostedTerminalSession.cs`의 캐시 해시 목록을 **함께** 수정합니다. 해시 목록에서 빠진 파일은 내용이 바뀌어도 캐시된 예전 호스트가 계속 쓰입니다.
 
 실제 기능은 `Packages/com.catch.unityterminal/Editor`에 있습니다.
@@ -52,6 +54,7 @@ PowerShell과 Codex·WSL 세션은 별도의 숨김 호스트 프로세스에서
 | `TerminalScreen.cs` | 고정 셀 VT 화면, 커서 이동, 대체 화면, 색상, 터미널 질의 응답 |
 | `TerminalInput.cs` | Codex·WSL 대화형 명령 인식과 터미널 키·붙여넣기 인코딩 |
 | `TerminalComposition.cs` | IME 조합 상태 추적과 조합 확정 키의 중복 전달 방지 |
+| `BackgroundAutoRefresh.cs` | 에디터가 백그라운드일 때 파일 변경 감지와 새로고침, 감시 오류 복구, Tools 메뉴 켜기·끄기 |
 | `TerminalToolbarLayout.cs` | 창 너비에 따른 툴바 배치. 좁으면 글꼴 크기·AutoScroll을 View 메뉴로 접고 셸 선택을 줄이며, Clear·Stop·Restart는 항상 표시 |
 | `InteractiveTerminalView.cs` | 대화형 화면 표시, 입력·IME 커밋, 선택과 복사 |
 
