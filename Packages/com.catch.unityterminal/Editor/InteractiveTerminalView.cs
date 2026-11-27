@@ -29,6 +29,8 @@ namespace UnityTerminal
         private bool selecting;
         private string status;
         public Action<string> Send;
+        // Set from the launch command (TerminalInput.UsesAltEnterForNewline): Shift+Enter sends ESC CR.
+        public bool AltEnterNewline;
         public Action<int, int> Resize;
 
         public InteractiveTerminalView(TerminalScreen screen) { this.screen = screen; }
@@ -313,7 +315,7 @@ namespace UnityTerminal
             {
                 // Preserve the modified key instead of forwarding a raw return produced
                 // by TextField. Newline-only paste is discarded by some terminal apps.
-                SendText(TerminalInput.Encode(TerminalKey.Enter, '\0', true, false, false, screen.ApplicationCursor));
+                SendText(TerminalInput.EncodeShiftEnter(AltEnterNewline, screen.ApplicationCursor));
                 e.Use(); return true;
             }
             // IME commits can arrive independently of a navigation KeyDown. Never forward

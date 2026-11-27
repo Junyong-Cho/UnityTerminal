@@ -22,6 +22,8 @@ namespace UnityTerminal
 
         [NonSerialized] private HostedShellSession session;
         [NonSerialized] private HostedInteractiveSession interactiveSession;
+        // Command that started the interactive session; decides Shift+Enter encoding across reloads.
+        [NonSerialized] private string interactiveCommand;
         private TerminalScreen interactiveScreen;
         private InteractiveTerminalView interactiveView;
         private int interactiveBlink;
@@ -73,7 +75,7 @@ namespace UnityTerminal
         [Serializable] private sealed class WindowResume
         {
             public HostResumeInfo Connection;
-            public string Shell, Directory, Input, InteractiveId, Status;
+            public string Shell, Directory, Input, InteractiveId, InteractiveCommand, Status;
             public string[] History;
             public int Cursor, Selection, HistoryIndex, Columns, Rows;
             public Vector2 Scroll;
@@ -124,6 +126,7 @@ namespace UnityTerminal
                 Scroll = scrollPosition, ScrollPending = scrollToBottomPending, PreserveViewport = preservePrimaryViewport,
                 Primary = primaryViewState, Status = interactiveStatus,
                 InteractiveId = interactiveSession == null ? "" : interactiveSession.Id,
+                InteractiveCommand = interactiveSession == null ? "" : interactiveCommand,
                 Columns = interactiveScreen == null ? 80 : interactiveScreen.Columns, Rows = interactiveScreen == null ? 24 : interactiveScreen.Rows,
                 AppView = interactiveView == null ? null : interactiveView.CaptureState() };
             saved.Connection = session.Detach();
@@ -152,6 +155,7 @@ namespace UnityTerminal
                 if (!string.IsNullOrEmpty(saved.InteractiveId))
                 {
                     interactiveSession = session.RestoreInteractive(saved.InteractiveId);
+                    interactiveCommand = saved.InteractiveCommand;
                     CreateInteractiveView(saved.Columns, saved.Rows);
                     pendingInteractiveView = saved.AppView;
                 }
@@ -322,6 +326,7 @@ namespace UnityTerminal
                     InteractiveTerminalView.MeasureCellSize(terminalStyle.font, fontSize));
                 var started = session.StartInteractive(command, grid.x, grid.y);
                 interactiveSession = started;
+                interactiveCommand = command;
                 primaryViewState = saved;
                 interactiveStatus = null;
                 CreateInteractiveView(grid.x, grid.y);
@@ -403,6 +408,7 @@ namespace UnityTerminal
         {
             interactiveScreen = new TerminalScreen(columns, rows);
             interactiveView = new InteractiveTerminalView(interactiveScreen) { Send = SendInteractive,
+                AltEnterNewline = TerminalInput.UsesAltEnterForNewline(interactiveCommand),
                 Resize = (width, height) =>
                 {
                     try { if (interactiveSession != null) interactiveSession.Resize(width, height); }

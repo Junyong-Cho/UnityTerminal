@@ -114,6 +114,116 @@ namespace UnityTerminal
             return true;
         }
 
+        // Programs whose composer treats ESC CR (Alt+Enter) as "insert a newline". Measured against real
+        // sessions: current Claude Code reads the Win32 Shift+Enter sequence as a plain Enter (submits),
+        // and both Claude and Codex insert a newline for ESC CR. Other programs keep the Win32 sequence:
+        // using the alternate screen does not mean ESC CR is safe (Vim leaves insert mode on the ESC), and
+        // PSReadLine reads ESC as "clear line". Add a program here only after checking its composer.
+        private static readonly string[] AltEnterNewlinePrograms = { "claude", "codex" };
+
+        // Whether the interactive session started by this command should get ESC CR for Shift+Enter.
+        // Recognizes the program directly (claude, "C:\...\codex.exe", & claude --resume) or after
+        // wsl options (wsl -e codex, wsl -d Ubuntu -- claude). A program started later from inside
+        // a shell session (wsl, then claude) is not known here and keeps the Win32 sequence.
+        // Only the words up to the program name are examined, so arguments may use PowerShell variables
+        // or expressions (claude --add-dir "$PWD"). TryTokenizeCommand is deliberately strict for the WSL
+        // auto-switch and rejects such commands as a whole, so it is not used here.
+        public static bool UsesAltEnterForNewline(string command)
+        {
+            if (string.IsNullOrEmpty(command)) return false;
+            var dynamicWords = new List<bool>();
+            List<string> words = LeadingWords(command, MaxLeadingWords, dynamicWords);
+            if (words.Count == 0) return false;
+            string program = ProgramName(words[0]);
+            if (program == "wsl")
+            {
+                int index = WslProgramIndex(words);
+                if (index < 0) return false;
+                // A variable or expression among the wsl options makes the position uncertain.
+                for (int i = 0; i <= index; i++) if (dynamicWords[i] == true) return false;
+                program = ProgramName(words[index]);
+            }
+            else if (dynamicWords[0] == true) return false;
+            return Array.IndexOf(AltEnterNewlinePrograms, program) >= 0;
+        }
+
+        private const int MaxLeadingWords = 16;
+
+        // Splits the start of a command line into words, keeping quoted text together; quotes are
+        // removed. dynamicWords[i] tells whether word i depends on PowerShell evaluation, judged per
+        // character by its quoting: single quotes are literal; in double quotes only $ and ` expand
+        // (a parenthesis there is a plain character, $( is caught by $); unquoted $, ( and ` start
+        // expressions. Literal paths such as 'C:\Program Files (x86)\claude.exe' stay static.
+        private static List<string> LeadingWords(string command, int maxWords, List<bool> dynamicWords)
+        {
+            var words = new List<string>();
+            var word = new StringBuilder();
+            char quote = '\0';
+            bool started = false, dynamic = false;
+            string text = command.Trim();
+            int start = text.StartsWith("&", StringComparison.Ordinal) ? 1 : 0;
+            for (int i = start; i < text.Length && words.Count < maxWords; i++)
+            {
+                char c = text[i];
+                if (quote != '\0')
+                {
+                    if (c == quote) quote = '\0';
+                    else
+                    {
+                        if (quote == '"' && (c == '$' || c == '`')) dynamic = true;
+                        word.Append(c);
+                    }
+                    continue;
+                }
+                if (c == '"' || c == '\'') { quote = c; started = true; continue; }
+                if (char.IsWhiteSpace(c))
+                {
+                    if (started == true)
+                    {
+                        words.Add(word.ToString()); dynamicWords.Add(dynamic);
+                        word.Length = 0; started = false; dynamic = false;
+                    }
+                    continue;
+                }
+                if (c == '$' || c == '(' || c == '`') dynamic = true;
+                word.Append(c); started = true;
+            }
+            if (started == true && words.Count < maxWords) { words.Add(word.ToString()); dynamicWords.Add(dynamic); }
+            return words;
+        }
+
+        private static string ProgramName(string token)
+        {
+            string name = token.Replace('\\', '/');
+            name = name.Substring(name.LastIndexOf('/') + 1).ToLowerInvariant();
+            foreach (string extension in new[] { ".exe", ".cmd", ".bat", ".ps1" })
+                if (name.EndsWith(extension, StringComparison.Ordinal)) return name.Substring(0, name.Length - extension.Length);
+            return name;
+        }
+
+        // Index of the Linux program in a wsl command line, or -1 when wsl only opens its shell.
+        private static int WslProgramIndex(List<string> tokens)
+        {
+            for (int i = 1; i < tokens.Count; i++)
+            {
+                string option = tokens[i];
+                if (option == "~" || option == "--system") continue;
+                if (option == "-d" || option == "--distribution" || option == "-u" || option == "--user" ||
+                    option == "--cd" || option == "--shell-type") { i++; continue; }
+                if (option.StartsWith("--", StringComparison.Ordinal) && option.Contains("=")) continue;
+                if (option == "--exec" || option == "-e" || option == "--") return i + 1 < tokens.Count ? i + 1 : -1;
+                return i;
+            }
+            return -1;
+        }
+
+        // Shift+Enter as a "new line, don't submit" key; see AltEnterNewlinePrograms.
+        public static string EncodeShiftEnter(bool altEnterNewline, bool applicationCursor)
+        {
+            if (altEnterNewline == true) return "\x1b\r";
+            return Encode(TerminalKey.Enter, '\0', true, false, false, applicationCursor);
+        }
+
         public static string Encode(TerminalKey key, char character, bool shift, bool alt, bool control, bool applicationCursor)
         {
             int modifier = 1 + (shift ? 1 : 0) + (alt ? 2 : 0) + (control ? 4 : 0);

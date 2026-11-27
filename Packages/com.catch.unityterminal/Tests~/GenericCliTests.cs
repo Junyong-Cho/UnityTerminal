@@ -36,14 +36,16 @@ namespace UnityTerminal.Tests
                             Console.WriteLine("INFO: no agent prompt or authentication/trust approval was submitted");
                             return;
                         }
-                        if (text.Contains("for shortcuts"))
+                        // The composer is ready once its prompt row (❯ or ›) is visible; recent Claude versions no longer
+                        // show "for shortcuts" in plan mode.
+                        if (PromptRow(screen) >= 0)
                         {
                             int prompt = PromptRow(screen);
                             if (!shifted && prompt >= 0 && screen.CursorY >= prompt)
                             {
                                 initialPrompt = prompt; initialCursor = screen.CursorY;
                                 string error;
-                                if (!session.TrySend(TerminalInput.Encode(TerminalKey.Enter, '\0', true, false, false, false), out error)) throw new Exception(error);
+                                if (!session.TrySend(TerminalInput.EncodeShiftEnter(TerminalInput.UsesAltEnterForNewline("claude --safe-mode --permission-mode plan"), false), out error)) throw new Exception(error);
                                 shifted = true;
                             }
                             else if (shifted && prompt >= 0 &&

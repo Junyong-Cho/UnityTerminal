@@ -133,6 +133,26 @@ namespace UnityTerminal.Tests
             Equal("\x1bOA", TerminalInput.Encode(TerminalKey.Up, '\0', false, false, false, true));
             Equal("\x1b[1;5D", TerminalInput.Encode(TerminalKey.Left, '\0', false, false, true, false));
             Equal("\x1b[Z", TerminalInput.Encode(TerminalKey.Tab, '\t', true, false, false, false));
+            // Shift+Enter: only sessions started as Claude or Codex get ESC CR (their composers insert a
+            // newline for it). Everything else keeps the Win32 input sequence: Vim also uses the alternate
+            // screen but would leave insert mode on the ESC, and PSReadLine would clear the line.
+            string win32ShiftEnter = TerminalInput.Encode(TerminalKey.Enter, '\0', true, false, false, false);
+            Equal("\x1b\r", TerminalInput.EncodeShiftEnter(true, false));
+            Equal(win32ShiftEnter, TerminalInput.EncodeShiftEnter(false, false));
+            foreach (string command in new[] { "claude", "claude --resume", "codex", "codex.cmd resume --last",
+                "& \"C:\\Program Files\\Claude\\claude.exe\" --continue", "wsl -e codex", "wsl -d Ubuntu -- claude", "wsl.exe --exec claude",
+                // Arguments may use PowerShell variables or expressions; only the program name decides.
+                "claude --add-dir \"$PWD\"", "claude --add-dir $env:TEMP", "codex -C \"$(Get-Location)\"", "wsl -e claude --add-dir \"$HOME\"",
+                // Parentheses inside a quoted literal path are plain characters, not expressions.
+                "& 'C:\\Program Files (x86)\\Claude\\claude.exe' --continue", "& \"C:\\Program Files (x86)\\Claude\\claude.exe\" --continue",
+                "'C:\\Tools (dev)\\codex.cmd'" })
+                Assert(TerminalInput.UsesAltEnterForNewline(command), "Expected ESC CR newline for: " + command);
+            foreach (string command in new[] { "", "wsl", "wsl -d Ubuntu", "vim", "wsl -e vim -Nu NONE", "wsl --exec vim", "python -i",
+                "pwsh", "less README.md", "claudette", "my-codex-wrapper",
+                // The program itself (or its position after wsl options) comes from a variable: unknown.
+                "& $claudePath", "$env:EDITOR README.md", "wsl -d $distro -e claude",
+                "& \"$env:LOCALAPPDATA\\claude.exe\"", "& (Get-Command claude).Source", "& `$x" })
+                Assert(!TerminalInput.UsesAltEnterForNewline(command), "Expected Win32 Shift+Enter for: " + command);
             Equal("\x1b[200~one\ntwo[201~\x1b[201~", TerminalInput.Paste("one\r\ntwo\x1b[201~", true));
             Assert(TerminalInput.IsCodexCommand("codex") && TerminalInput.IsCodexCommand("codex resume") &&
                 TerminalInput.IsCodexCommand("& 'C:/some folder/codex.exe' --help") && !TerminalInput.IsCodexCommand("echo codex"), "Codex detection is incorrect");
