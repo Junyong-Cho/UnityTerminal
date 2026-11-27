@@ -7,6 +7,7 @@ using System.IO;
 using System.IO.Pipes;
 using System.Security.AccessControl;
 using System.Security.Principal;
+using System.Text;
 using System.Threading;
 using Microsoft.Win32.SafeHandles;
 
@@ -47,6 +48,9 @@ namespace UnityTerminal
             private TerminalScreen screen;
             private NamedPipeServerStream pipe;
             private Thread acceptThread;
+            private Thread diagnosticsThread;
+            // Progress marks read by the diagnostics thread without the gate.
+            private long lastPumpTicks, lastFrameTicks;
             private Thread primaryWriter;
             private readonly object inputGate = new object();
             private readonly Queue<string> primaryInput = new Queue<string>();
@@ -58,11 +62,23 @@ namespace UnityTerminal
             private long acknowledged;
             private int encodedBufferVersion = -1, encodedScreenVersion = -1;
             private byte[] encodedBuffer, encodedScreen;
+            // Diagnostics for Tools > Unity Terminal > Capture Diagnostics. Unity asks through a request file
+            // (not a protocol command): an older host would treat an unknown command as a transport failure,
+            // which ends the whole session. A host without this code simply ignores the file.
+            private const int RawTailLimit = 65536, CommandLogLimit = 300;
+            private readonly StringBuilder rawTail = new StringBuilder();
+            private readonly Queue<string> commandLog = new Queue<string>();
+            private long rawTotal;
+            private string diagnosticsRequest;
+            // The command being applied right now (read without the gate by the diagnostics writer).
+            private volatile string applyingCommand;
+            private long applyingSinceTicks;
 
             internal Server(string name, string file, string shell, string directory)
             {
                 pipeName = name; executable = file;
                 using (var process = Process.GetCurrentProcess()) { hostPid = process.Id; hostStart = process.StartTime.ToUniversalTime().Ticks; }
+                diagnosticsRequest = Path.Combine(Path.Combine(Path.GetTempPath(), "UnityTerminal"), "diagnostics-" + hostPid + ".request");
                 stdout = new AnsiParser(buffer); stderr = new AnsiParser(buffer, true);
                 Message("[System] Starting " + shell + " session in:\n" + directory + "\n");
                 try { primary = ShellSession.StartExecutable(file, directory); primaryLifetime = ConPtySession.ProtectProcessLifetime(primary.ProcessId); }
@@ -77,11 +93,15 @@ namespace UnityTerminal
                 primaryWriter.Start();
                 acceptThread = new Thread(Accept) { IsBackground = true, Name = "Terminal host transport" };
                 acceptThread.Start();
+                // Its own thread, so a request is still answered while the main loop or Apply holds the gate.
+                diagnosticsThread = new Thread(WatchDiagnostics) { IsBackground = true, Name = "Terminal host diagnostics" };
+                diagnosticsThread.Start();
                 var check = Stopwatch.StartNew();
                 while (!stopping)
                 {
                     if (check.ElapsedMilliseconds >= 500) { if (owner.HasExited) break; check.Restart(); }
                     lock (gate) Pump();
+                    Interlocked.Exchange(ref lastPumpTicks, DateTime.UtcNow.Ticks);
                     Thread.Sleep(10);
                 }
             }
@@ -100,7 +120,7 @@ namespace UnityTerminal
                 if (interactive != null)
                 {
                     string text; int characters = 0;
-                    while (characters < 65536 && interactive.TryDequeue(out text)) { screen.Feed(text); characters += text.Length; }
+                    while (characters < 65536 && interactive.TryDequeue(out text)) { RecordRaw(text); screen.Feed(text); characters += text.Length; }
                     int code;
                     if (interactive.TryGetExitCode(out code))
                     {
@@ -139,13 +159,18 @@ namespace UnityTerminal
                                     foreach (HostCommand command in commands)
                                     {
                                         if (command.Sequence <= acknowledged) continue;
-                                        Apply(command); acknowledged = command.Sequence;
+                                        Interlocked.Exchange(ref applyingSinceTicks, DateTime.UtcNow.Ticks);
+                                        applyingCommand = command.Kind + " seq=" + command.Sequence;
+                                        try { Apply(command); }
+                                        finally { applyingCommand = null; }
+                                        acknowledged = command.Sequence;
                                         if (command.Kind == HostCommandKind.Shutdown) shutdown = true;
                                     }
                                     Pump();
                                     state = Snapshot(knownBuffer, knownScreen, knownApp);
                                 }
                                 TerminalHostProtocol.WriteFrame(connected, writer => TerminalHostProtocol.WriteState(writer, state));
+                                Interlocked.Exchange(ref lastFrameTicks, DateTime.UtcNow.Ticks);
                                 if (shutdown) stopping = true;
                             }
                         }
@@ -162,6 +187,7 @@ namespace UnityTerminal
             {
                 string error;
                 notice = "";
+                LogCommand(command);
                 switch (command.Kind)
                 {
                     case HostCommandKind.PrimaryInput:
@@ -239,6 +265,122 @@ namespace UnityTerminal
                 return state;
             }
             private void Message(string message) { buffer.Append(message, new TerminalStyle { Color = "#808080", Italic = true }); }
+
+            // Called with gate held (Pump).
+            private void RecordRaw(string text)
+            {
+                rawTail.Append(text);
+                rawTotal += text.Length;
+                if (rawTail.Length > RawTailLimit) rawTail.Remove(0, rawTail.Length - RawTailLimit);
+            }
+
+            // Called with gate held (Apply). Input text is kept short; it shows which keys reached the host.
+            private void LogCommand(HostCommand command)
+            {
+                string text = command.Text ?? "";
+                string preview = text.Length > 48 ? text.Substring(0, 48) + "..." : text;
+                commandLog.Enqueue(DateTime.Now.ToString("HH:mm:ss.fff") + " seq=" + command.Sequence + " " + command.Kind +
+                    " id=" + (command.Id ?? "") + " size=" + command.Columns + "x" + command.Rows + " chars=" + text.Length + " text=[" + Escape(preview) + "]");
+                while (commandLog.Count > CommandLogLimit) commandLog.Dequeue();
+            }
+
+            private static string Escape(string text)
+            {
+                var escaped = new StringBuilder(text.Length + 16);
+                foreach (char c in text)
+                {
+                    if (c == '\x1b') escaped.Append("\\e");
+                    else if (c == '\n') escaped.Append("\\n\n");
+                    else if (c == '\r') escaped.Append("\\r");
+                    else if (c < ' ' || c == '\x7f') escaped.Append("\\x").Append(((int)c).ToString("x2"));
+                    else escaped.Append(c);
+                }
+                return escaped.ToString();
+            }
+
+            // Diagnostics thread: Unity writes the target path into diagnostics-<host pid>.request.
+            private void WatchDiagnostics()
+            {
+                while (!stopping)
+                {
+                    Thread.Sleep(250);
+                    try { WriteDiagnosticsIfRequested(); }
+                    catch (Exception) { } // Diagnostics must never take the host down.
+                }
+            }
+
+            private void WriteDiagnosticsIfRequested()
+            {
+                if (!File.Exists(diagnosticsRequest)) return;
+                string target;
+                try { target = File.ReadAllText(diagnosticsRequest).Trim(); File.Delete(diagnosticsRequest); }
+                catch (IOException) { return; }
+                catch (UnauthorizedAccessException) { return; }
+                if (target.Length == 0) return;
+                var text = new StringBuilder();
+                long now = DateTime.UtcNow.Ticks;
+                // First what can be read without the gate, so it is reported even when the gate is stuck.
+                string busy = applyingCommand;
+                text.AppendLine("host pid=" + hostPid + " pipe=" + pipeName + " shell=" + executable);
+                text.AppendLine("applying=" + (busy == null ? "none" : "[" + busy + "] for " +
+                    ((now - Interlocked.Read(ref applyingSinceTicks)) / TimeSpan.TicksPerMillisecond) + " ms") +
+                    " mainLoopLastPump=" + Ago(Interlocked.Read(ref lastPumpTicks), now) + " lastFrameToUnity=" + Ago(Interlocked.Read(ref lastFrameTicks), now));
+                NamedPipeServerStream currentPipe = pipe;
+                bool clientConnected = false;
+                try { clientConnected = currentPipe != null && currentPipe.IsConnected; }
+                catch (ObjectDisposedException) { }
+                catch (InvalidOperationException) { }
+                text.AppendLine("unity pipe object=" + (currentPipe != null) + " clientConnected=" + clientConnected);
+                ConPtySession app = interactive;
+                if (app != null) text.AppendLine(app.DescribeProgress());
+                // Do not wait forever: a host stuck while applying a command or pumping holds the gate,
+                // and that is itself the finding to report.
+                if (!Monitor.TryEnter(gate, 2000))
+                {
+                    text.AppendLine("the host lock has been busy for over 2000 ms (stuck in Apply or Pump); the state below is unavailable.");
+                    WriteDiagnosticsFile(target, text);
+                    return;
+                }
+                try
+                {
+                    text.AppendLine("primary pid=" + (primary == null ? 0 : primary.ProcessId) + " exited=" + primaryExited + " code=" + primaryExitCode + " failure=[" + failure + "]");
+                    text.AppendLine("interactive id=" + appId + " active=" + (interactive != null) + " pid=" + (interactive == null ? 0 : interactive.ProcessId) +
+                        " exited=" + appExited + " code=" + appExitCode + " failure=[" + appFailure + "] notice=[" + notice + "]" +
+                        (interactive == null ? "" : " conptyFailure=[" + (interactive.Failure ?? "") + "]"));
+                    if (screen != null)
+                        text.AppendLine("screen " + screen.Columns + "x" + screen.Rows + " version=" + screen.Version + " alternate=" + screen.Alternate +
+                            " cursor=" + screen.CursorX + "," + screen.CursorY + " visible=" + screen.CursorVisible + " appCursor=" + screen.ApplicationCursor);
+                    text.AppendLine("acknowledged=" + acknowledged);
+                    lock (inputGate) text.AppendLine("primary input queued=" + primaryInput.Count + " chars=" + inputCharacters);
+                    text.AppendLine("--- recent commands from Unity (oldest first, up to " + CommandLogLimit + ") ---");
+                    foreach (string entry in commandLog) text.AppendLine(entry);
+                    text.AppendLine("--- recent interactive app output: last " + rawTail.Length + " of " + rawTotal + " chars (\\e = ESC) ---");
+                    text.AppendLine(Escape(rawTail.ToString()));
+                }
+                finally { Monitor.Exit(gate); }
+                WriteDiagnosticsFile(target, text);
+            }
+
+            // Written to a temporary name and closed before the final name appears, so Unity can treat
+            // the final file's existence as "complete".
+            private static void WriteDiagnosticsFile(string target, StringBuilder text)
+            {
+                string partial = target + ".partial";
+                try
+                {
+                    Directory.CreateDirectory(Path.GetDirectoryName(target));
+                    File.WriteAllText(partial, text.ToString(), new UTF8Encoding(false));
+                    if (File.Exists(target)) File.Delete(target);
+                    File.Move(partial, target);
+                }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+            }
+
+            private static string Ago(long ticks, long now)
+            {
+                return ticks == 0 ? "never" : ((now - ticks) / TimeSpan.TicksPerMillisecond) + "ms ago";
+            }
             private void WritePrimary()
             {
                 while (!stopping)

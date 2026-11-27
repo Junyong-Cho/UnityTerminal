@@ -50,6 +50,27 @@ namespace UnityTerminal.Tests
                 WaitScreen(client, id, screen, "COUNT:3|CHAR:98");
                 Console.WriteLine("PASS: reconnect keeps host, PowerShell, app and descendant PIDs; app memory and Unicode alternate screen survive");
 
+                // Capture Diagnostics asks the host through a request file (never a protocol command).
+                string diagnostics = Path.Combine(Path.Combine(directory, "Temp"), "HostDiagnostics-" + Guid.NewGuid().ToString("N") + ".txt");
+                string requestFolder = Path.Combine(Path.GetTempPath(), "UnityTerminal");
+                Directory.CreateDirectory(requestFolder);
+                File.WriteAllText(Path.Combine(requestFolder, "diagnostics-" + hostPid + ".request"), diagnostics);
+                try
+                {
+                    Wait(() => File.Exists(diagnostics) && new FileInfo(diagnostics).Length > 0, "Host diagnostics file");
+                    Thread.Sleep(100);
+                    string report = File.ReadAllText(diagnostics);
+                    Require(report.Contains("host pid=" + hostPid), "Host diagnostics lack the host PID");
+                    Require(report.Contains("InteractiveInput") && report.Contains("text=[ax]") && report.Contains("text=[b]"), "Host diagnostics lack recent input commands");
+                    Require(report.Contains("COUNT:3|CHAR:98"), "Host diagnostics lack the app's raw output");
+                    Require(Regex.IsMatch(report, @"conpty input queued=0 chars=0 writes=[1-9]\d* writtenChars=[1-9]") && report.Contains("writer=idle") &&
+                        Regex.IsMatch(report, @"output reads=[1-9]"), "Host diagnostics lack ConPTY input/output progress");
+                    Require(report.Contains("clientConnected=True"), "Host diagnostics do not report the connected Unity client");
+                    Require(Alive(hostPid) && Alive(appPid), "Writing diagnostics disturbed the session");
+                }
+                finally { if (File.Exists(diagnostics)) File.Delete(diagnostics); }
+                Console.WriteLine("PASS: the host writes its state, recent commands and raw app output on a diagnostics request");
+
                 Send(client, HostCommandKind.PrimaryInput, "", "[Console]::WriteLine(('KEPT-' + $global:HostKeep))");
                 WaitBuffer(client, buffer, "\nKEPT-parent\n");
                 Console.WriteLine("PASS: primary PowerShell variables and styled scrollback survive reconnect");

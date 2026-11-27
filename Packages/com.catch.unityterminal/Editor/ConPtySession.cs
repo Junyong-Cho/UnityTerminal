@@ -35,6 +35,33 @@ namespace UnityTerminal
         private int columns;
         private int rows;
         public string Failure { get; private set; }
+
+        // Progress counters for diagnostics, readable without locks: whether input reached the console
+        // and whether output is still being read (or waits because the queue is full).
+        private volatile int queuedInputs;
+        private volatile bool readerWaiting, writerExited;
+        // Writes started and completed decide "writing"; times only give the elapsed display
+        // (two DateTime.UtcNow reads can return the same tick, so times cannot order the steps).
+        private long writesStarted, inputWrites, inputWrittenCharacters, writeStartTicks, writeEndTicks;
+        private long lastReadTicks, outputReads, outputCharacters;
+
+        public string DescribeProgress()
+        {
+            long now = DateTime.UtcNow.Ticks;
+            long started = Interlocked.Read(ref writesStarted), completed = Interlocked.Read(ref inputWrites);
+            long start = Interlocked.Read(ref writeStartTicks), end = Interlocked.Read(ref writeEndTicks), read = Interlocked.Read(ref lastReadTicks);
+            string writing = writerExited ? "exited" : started > completed ? "writing (started " + Ago(start, now) + ")" : "idle";
+            return "conpty input queued=" + queuedInputs + " chars=" + inputCharacters + " writes=" + completed +
+                " writtenChars=" + Interlocked.Read(ref inputWrittenCharacters) + " lastWriteEnd=" + Ago(end, now) + " writer=" + writing +
+                " failure=[" + (Failure ?? "") + "]" +
+                " | output reads=" + Interlocked.Read(ref outputReads) + " chars=" + Interlocked.Read(ref outputCharacters) +
+                " lastRead=" + Ago(read, now) + " readerWaitingForQueue=" + readerWaiting + " stopping=" + stopping + " closing=" + closing;
+        }
+
+        private static string Ago(long ticks, long now)
+        {
+            return ticks == 0 ? "never" : ((now - ticks) / TimeSpan.TicksPerMillisecond) + "ms ago";
+        }
         internal int ProcessId { get; private set; }
 
         public static ConPtySession Start(string shellType, string command, string directory, int columns, int rows)
@@ -182,7 +209,12 @@ namespace UnityTerminal
                     string text = new string(chars, 0, count);
                     lock (outputLock)
                     {
+                        Interlocked.Exchange(ref lastReadTicks, DateTime.UtcNow.Ticks);
+                        Interlocked.Increment(ref outputReads);
+                        Interlocked.Add(ref outputCharacters, count);
+                        readerWaiting = output.Count >= 128;
                         while (!stopping && output.Count >= 128) Monitor.Wait(outputLock);
+                        readerWaiting = false;
                         if (!stopping) output.Enqueue(text);
                     }
                 }
@@ -205,13 +237,23 @@ namespace UnityTerminal
                         if (stopping || closing != 0) break;
                         text = input.Dequeue();
                         inputCharacters -= text.Length;
+                        queuedInputs = input.Count;
                     }
+                    Interlocked.Exchange(ref writeStartTicks, DateTime.UtcNow.Ticks);
+                    Interlocked.Increment(ref writesStarted);
                     writer.Write(text);
+                    Interlocked.Exchange(ref writeEndTicks, DateTime.UtcNow.Ticks);
+                    Interlocked.Add(ref inputWrittenCharacters, text.Length);
+                    Interlocked.Increment(ref inputWrites);
                 }
             }
             catch (IOException ex) { if (!stopping && closing == 0) Failure = ex.Message; }
             catch (ObjectDisposedException) { }
-            finally { try { writer.Dispose(); } catch (IOException) { } }
+            finally
+            {
+                writerExited = true;
+                try { writer.Dispose(); } catch (IOException) { }
+            }
         }
 
         public bool TrySend(string text, out string error)
@@ -223,6 +265,7 @@ namespace UnityTerminal
                 if (text.Length + inputCharacters > 262144) { error = "Input is full. Paste a smaller amount of text."; return false; }
                 input.Enqueue(text);
                 inputCharacters += text.Length;
+                queuedInputs = input.Count;
                 Monitor.PulseAll(inputLock);
                 return true;
             }
