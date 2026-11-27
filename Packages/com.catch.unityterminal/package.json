@@ -1,6 +1,6 @@
 {
   "name": "com.catch.unityterminal",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "displayName": "Unity Editor Terminal",
   "description": "A PowerShell terminal inside Unity Editor with interactive Codex and WSL sessions that survive script recompilation, ANSI colors, and path completion.",
   "unity": "2020.3",
