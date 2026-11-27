@@ -133,6 +133,10 @@ namespace UnityTerminal.Tests
             Equal("\x1bOA", TerminalInput.Encode(TerminalKey.Up, '\0', false, false, false, true));
             Equal("\x1b[1;5D", TerminalInput.Encode(TerminalKey.Left, '\0', false, false, true, false));
             Equal("\x1b[Z", TerminalInput.Encode(TerminalKey.Tab, '\t', true, false, false, false));
+            // Backspace deletes a character; Ctrl+Backspace deletes the previous word as ^W.
+            Equal("\x7f", TerminalInput.Encode(TerminalKey.Backspace, '\0', false, false, false, false));
+            Equal("\x17", TerminalInput.Encode(TerminalKey.Backspace, '\0', false, false, true, false));
+            Equal("\x1b\x7f", TerminalInput.Encode(TerminalKey.Backspace, '\0', false, true, false, false));
             // Shift+Enter: only sessions started as Claude or Codex get ESC CR (their composers insert a
             // newline for it). Everything else keeps the Win32 input sequence: Vim also uses the alternate
             // screen but would leave insert mode on the ESC, and PSReadLine would clear the line.

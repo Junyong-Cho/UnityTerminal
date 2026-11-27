@@ -239,7 +239,10 @@ namespace UnityTerminal
                         return "\x1b[13;28;13;1;" + state + ";1_\x1b[13;28;13;0;" + state + ";1_";
                     }
                     return alt ? "\x1b\r" : "\r";
-                case TerminalKey.Backspace: result = "\x7f"; break;
+                // Ctrl+Backspace deletes the previous word as ^W (0x17). Measured: ^W deletes a word in
+                // Claude, Codex, PSReadLine (5.1/7) and WSL bash; ^H and the Win32 input sequence delete
+                // only one character in bash, and ESC DEL would be read as Esc by Vim and PSReadLine.
+                case TerminalKey.Backspace: result = control && !alt ? "\x17" : "\x7f"; break;
                 case TerminalKey.Tab: return shift ? "\x1b[Z" : "\t";
                 case TerminalKey.Escape: return "\x1b";
                 case TerminalKey.Up: case TerminalKey.Down: case TerminalKey.Right: case TerminalKey.Left: case TerminalKey.Home: case TerminalKey.End:
