@@ -20,7 +20,11 @@ namespace UnityTerminal
         private float measuredPixelScale;
         private Rect bounds;
         private int control;
-        private bool focusPending = true;
+        // IMGUI control IDs are positional: when the controls drawn before this view change (the toolbar
+        // switches layout at a width threshold), the input control gets a new ID while
+        // GUIUtility.keyboardControl keeps the old one, and every key was dropped until Stop.
+        // The view therefore owns focus by name, not by ID.
+        private bool ownsFocus = true;
         private int scrollBack;
         private float scrollRemainder;
         private bool scrollingApplication;
@@ -130,6 +134,15 @@ namespace UnityTerminal
         public void Draw(Rect rect, Font font, int fontSize, bool windowFocused)
         {
             bounds = rect;
+            lastWindowFocused = windowFocused;
+            // Sample before this event's TextField and focus recovery run: both can change focus, which
+            // would hide a lost-focus state from the diagnostics and the input trace.
+            preKeyboardControl = GUIUtility.keyboardControl;
+            preOwnsFocus = ownsFocus;
+            focusRecovered = false;
+            Event current = Event.current;
+            if (current.type == EventType.MouseDown && current.button == 1 && rect.Contains(current.mousePosition))
+                diagnosticsAtClick = BuildDiagnostics();
             if (textStyle == null) textStyle = new GUIStyle { clipping = TextClipping.Clip, wordWrap = false, richText = false, alignment = TextAnchor.UpperLeft };
             textStyle.font = font;
             textStyle.fontSize = fontSize;
@@ -178,11 +191,7 @@ namespace UnityTerminal
             }
             finally { GUI.skin.settings.cursorColor = caretColor; }
             composing = composition.ConsumesNavigation(inputEvent ?? Event.current);
-            if (focusPending && Event.current.type != EventType.Layout)
-            {
-                GUI.FocusControl("InteractiveTerminal");
-                focusPending = false;
-            }
+            if (Event.current.type != EventType.Layout) KeepKeyboardFocus(windowFocused);
             if (GUI.GetNameOfFocusedControl() == "InteractiveTerminal")
             {
                 control = GUIUtility.keyboardControl;
@@ -192,6 +201,23 @@ namespace UnityTerminal
                     editor.text = "";
                     editor.cursorIndex = editor.selectIndex = 0;
                 }
+            }
+        }
+
+        // Called after the input control is drawn in this event. If focus is on the old ID of this
+        // control (the ID shifted) or on nothing, take it back by name. If another control took focus
+        // (a different, non-zero ID), the user moved focus on purpose: give up ownership until the
+        // next click inside the view.
+        private void KeepKeyboardFocus(bool windowFocused)
+        {
+            if (GUI.GetNameOfFocusedControl() == "InteractiveTerminal") { ownsFocus = true; return; }
+            int focused = GUIUtility.keyboardControl;
+            // Before the first grab (control == 0) focus may still be on the primary input field.
+            if (control != 0 && focused != 0 && focused != control) ownsFocus = false;
+            if (ownsFocus == true && (windowFocused == true || control == 0))
+            {
+                GUI.FocusControl("InteractiveTerminal");
+                focusRecovered = control != 0;
             }
         }
 
@@ -269,19 +295,99 @@ namespace UnityTerminal
         }
 
         // Called after the window has finished registering all GUILayout controls.
+        // Recent input decisions for Tools > Unity Terminal > Capture Diagnostics: for each key, click,
+        // command or IME commit, what arrived, the focus/IME state, and what (if anything) reached the app.
+        private struct InputTrace
+        {
+            public DateTime Time;
+            public EventType Type;
+            public KeyCode Key;
+            public char Character;
+            public EventModifiers Modifiers;
+            public int KeyboardControl, Control;
+            public bool OwnsFocus, FocusRecovered, Composing, Handled;
+            public string Committed, Sent;
+        }
+        private const int InputTraceLimit = 256;
+        private readonly InputTrace[] inputTrace = new InputTrace[InputTraceLimit];
+        private int inputTraceNext, inputTraceCount;
+        private bool tracingInput;
+        // Focus state at the start of Draw (before focus recovery), and whether this event recovered focus.
+        private int preKeyboardControl;
+        private bool preOwnsFocus, focusRecovered;
+        private string sentThisEvent;
+
         public bool HandleInput()
+        {
+            Event source = inputEvent ?? Event.current;
+            bool traced = source.type == EventType.KeyDown || source.type == EventType.MouseDown ||
+                source.type == EventType.ExecuteCommand || string.IsNullOrEmpty(committedText) == false;
+            if (traced == false) return HandleInputCore();
+            var entry = new InputTrace
+            {
+                Time = DateTime.Now, Type = source.type, Key = source.keyCode, Character = source.character, Modifiers = source.modifiers,
+                KeyboardControl = preKeyboardControl, Control = control, OwnsFocus = preOwnsFocus, FocusRecovered = focusRecovered,
+                Composing = composing, Committed = committedText
+            };
+            sentThisEvent = null;
+            tracingInput = true;
+            try { entry.Handled = HandleInputCore(); }
+            finally { tracingInput = false; }
+            entry.Sent = sentThisEvent;
+            inputTrace[inputTraceNext] = entry;
+            inputTraceNext = (inputTraceNext + 1) % InputTraceLimit;
+            if (inputTraceCount < InputTraceLimit) inputTraceCount++;
+            return entry.Handled;
+        }
+
+        internal string DumpInputTrace()
+        {
+            var text = new StringBuilder();
+            int start = (inputTraceNext - inputTraceCount + InputTraceLimit) % InputTraceLimit;
+            for (int i = 0; i < inputTraceCount; i++)
+            {
+                InputTrace entry = inputTrace[(start + i) % InputTraceLimit];
+                text.Append(entry.Time.ToString("HH:mm:ss.fff")).Append(' ').Append(entry.Type)
+                    .Append(" key=").Append(entry.Key).Append(" char=").Append((int)entry.Character).Append(" mods=").Append(entry.Modifiers)
+                    .Append(" kb=").Append(entry.KeyboardControl).Append(" control=").Append(entry.Control).Append(" owns=").Append(entry.OwnsFocus).Append(" recovered=").Append(entry.FocusRecovered)
+                    .Append(" composing=").Append(entry.Composing).Append(" committed=[").Append(TerminalDiagnostics.Escape(entry.Committed))
+                    .Append("] handled=").Append(entry.Handled).Append(" sent=").Append(entry.Sent == null ? "none" : "[" + TerminalDiagnostics.Escape(entry.Sent) + "]")
+                    .AppendLine();
+            }
+            return text.ToString();
+        }
+
+        // The view's current lines (or the selection snapshot shown instead), then the scrollback.
+        internal string DumpScreen()
+        {
+            var text = new StringBuilder();
+            text.AppendLine("visible rows (scrollBack=" + scrollBack + ", showing " + (selectionLines != null && (selecting || HasSelection) ? "selection snapshot" : "live screen") + "):");
+            for (int y = 0; y < screen.Rows; y++) text.Append(y.ToString("00")).Append("| ").AppendLine(TerminalScreen.LineText(SelectionLine(y)).TrimEnd());
+            text.AppendLine("live screen rows:");
+            for (int y = 0; y < screen.Rows; y++) text.Append(y.ToString("00")).Append("| ").AppendLine(TerminalScreen.LineText(screen.GetLine(y)).TrimEnd());
+            text.AppendLine("scrollback (" + screen.HistoryCount + " lines, oldest first):");
+            for (int i = screen.HistoryCount; i > 0; i--) text.AppendLine(TerminalScreen.LineText(screen.GetLine(0, i)).TrimEnd());
+            return text.ToString();
+        }
+
+        private bool HandleInputCore()
         {
             Event e = Event.current;
             // The IME TextField may consume mouse events before this handler runs.
             Event mouse = inputEvent ?? e;
             if (mouse.type == EventType.MouseDown && bounds.Contains(mouse.mousePosition))
             {
-                GUIUtility.keyboardControl = control;
+                // Focus by name: the saved ID may be stale after the controls before the view changed.
+                ownsFocus = true;
+                GUI.FocusControl("InteractiveTerminal");
+                if (GUI.GetNameOfFocusedControl() == "InteractiveTerminal") control = GUIUtility.keyboardControl;
                 if (mouse.button == 1)
                 {
                     var menu = new GenericMenu();
                     menu.AddItem(new GUIContent("Copy"), false, Copy);
                     menu.AddItem(new GUIContent("Paste"), false, Paste);
+                    menu.AddSeparator("");
+                    menu.AddItem(new GUIContent("Copy diagnostics"), false, () => { GUIUtility.systemCopyBuffer = diagnosticsAtClick; });
                     menu.ShowAsContext();
                 }
                 else if (mouse.button == 0)
@@ -346,8 +452,41 @@ namespace UnityTerminal
             e.Use(); return true;
         }
 
+        // Diagnostics for an intermittent "keys do nothing" state: right-click > Copy diagnostics copies
+        // the state captured at the click (focus, IME composition, selection/scroll, last input, session).
+        public Func<string> SessionDiagnostics;
+        private string diagnosticsAtClick = "";
+        private DateTime lastSendUtc;
+        private int sendCount;
+        private bool lastWindowFocused;
+
+        internal string BuildDiagnostics()
+        {
+            var text = new StringBuilder();
+            text.AppendLine("Unity Terminal interactive diagnostics " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
+            text.AppendLine("focus ownsFocus=" + ownsFocus + " control=" + control + " keyboardControl=" + GUIUtility.keyboardControl +
+                " focusedName=[" + GUI.GetNameOfFocusedControl() + "] windowFocused=" + lastWindowFocused);
+            text.AppendLine("ime composing=" + composing + " compositionString=[" + Input.compositionString + "] mode=" + Input.imeCompositionMode +
+                " " + composition.Describe());
+            text.AppendLine("view scrollBack=" + scrollBack + "/" + screen.HistoryCount + " selection=" + selectionStart + ".." + selectionEnd +
+                " selecting=" + selecting + " snapshot=" + (selectionLines != null) + " status=[" + (status ?? "") + "] altEnterNewline=" + AltEnterNewline);
+            text.AppendLine("screen " + screen.Columns + "x" + screen.Rows + " version=" + screen.Version + " alternate=" + screen.Alternate +
+                " cursor=" + screen.CursorX + "," + screen.CursorY + " visible=" + screen.CursorVisible + " appCursor=" + screen.ApplicationCursor +
+                " title=[" + screen.Title + "]");
+            text.AppendLine("input sent=" + sendCount + " last=" + (sendCount == 0 ? "never" : (DateTime.UtcNow - lastSendUtc).TotalMilliseconds.ToString("0") + "ms ago"));
+            if (SessionDiagnostics != null)
+            {
+                try { text.AppendLine(SessionDiagnostics()); }
+                catch (Exception ex) { text.AppendLine("session diagnostics failed: " + ex.Message); }
+            }
+            return text.ToString();
+        }
+
         private void SendText(string text)
         {
+            sendCount++;
+            lastSendUtc = DateTime.UtcNow;
+            if (tracingInput == true) sentThisEvent = sentThisEvent == null ? text : sentThisEvent + text;
             scrollRemainder = 0;
             scrollBack = 0; selectionStart = selectionEnd = -1; status = null;
             if (Send != null) Send(text);

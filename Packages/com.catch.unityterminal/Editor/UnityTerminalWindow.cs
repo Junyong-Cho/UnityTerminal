@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using System.Collections.Generic;
+using System.Text;
 using UnityEngine;
 using UnityEditor;
 
@@ -24,6 +25,8 @@ namespace UnityTerminal
         [NonSerialized] private HostedInteractiveSession interactiveSession;
         // Command that started the interactive session; decides Shift+Enter encoding across reloads.
         [NonSerialized] private string interactiveCommand;
+        // Diagnostics only: when the interactive screen last changed.
+        [NonSerialized] private DateTime lastScreenChangeUtc;
         private TerminalScreen interactiveScreen;
         private InteractiveTerminalView interactiveView;
         private int interactiveBlink;
@@ -356,6 +359,7 @@ namespace UnityTerminal
         private void UpdateInteractive()
         {
             bool changed = interactiveSession.ApplyScreen(interactiveScreen);
+            if (changed) lastScreenChangeUtc = DateTime.UtcNow;
             if (changed && pendingInteractiveView != null)
             {
                 interactiveView.RestoreState(pendingInteractiveView); pendingInteractiveView = null;
@@ -404,11 +408,52 @@ namespace UnityTerminal
             Repaint();
         }
 
+        // Everything this window knows, for Tools > Unity Terminal > Capture Diagnostics.
+        // Returns the host process ID so the caller can ask that host for its own state.
+        internal int AppendDiagnostics(StringBuilder text)
+        {
+            text.AppendLine("window title=[" + titleContent.text + "] focused=" + (focusedWindow == this) + " position=" + position + " docked=" + docked +
+                " shell=" + shellType + " fontSize=" + fontSize + " autoScroll=" + autoScroll + " waitingForShellDiscovery=" + waitingForShellDiscovery +
+                " reloadInProgress=" + reloadInProgress + " interactiveStatus=[" + (interactiveStatus ?? "") + "]");
+            text.AppendLine("cwd=[" + currentWorkingDirectory + "] history=" + commandHistory.Count + " draft(" + currentInput.Length + ")=[" + TerminalDiagnostics.Escape(currentInput) + "]");
+            if (session == null) text.AppendLine("primary session=none");
+            else text.AppendLine("primary pid=" + session.ProcessId + " ready=" + session.IsReady + " failure=[" + (session.Failure ?? "") + "]\n" + session.Connection.Describe());
+            text.AppendLine();
+            text.AppendLine("--- primary output (last 200 lines) ---");
+            string[] lines = buffer.GetPlainText().Split('\n');
+            for (int i = Math.Max(0, lines.Length - 200); i < lines.Length; i++) text.AppendLine(lines[i].TrimEnd('\r'));
+            text.AppendLine();
+            if (interactiveSession == null || interactiveView == null) text.AppendLine("--- interactive session: none ---");
+            else
+            {
+                text.AppendLine("--- interactive session ---");
+                text.AppendLine(DescribeInteractive());
+                text.AppendLine();
+                text.AppendLine("--- interactive view state ---");
+                text.AppendLine(interactiveView.BuildDiagnostics());
+                text.AppendLine("--- interactive input decisions (oldest first) ---");
+                text.AppendLine(interactiveView.DumpInputTrace());
+                text.AppendLine("--- interactive screen ---");
+                text.AppendLine(interactiveView.DumpScreen());
+            }
+            return session == null ? 0 : session.HostProcessId;
+        }
+
+        private string DescribeInteractive()
+        {
+            string screenChange = lastScreenChangeUtc == default(DateTime) ? "never" :
+                (DateTime.UtcNow - lastScreenChangeUtc).TotalMilliseconds.ToString("0") + "ms ago";
+            return "window focused=" + (focusedWindow == this) + " width=" + position.width.ToString("0") + " height=" + position.height.ToString("0") +
+                " docked=" + docked + " command=[" + interactiveCommand + "] lastScreenChange=" + screenChange + "\n" +
+                (interactiveSession == null ? "session=none" : interactiveSession.Describe());
+        }
+
         private void CreateInteractiveView(int columns, int rows)
         {
             interactiveScreen = new TerminalScreen(columns, rows);
             interactiveView = new InteractiveTerminalView(interactiveScreen) { Send = SendInteractive,
                 AltEnterNewline = TerminalInput.UsesAltEnterForNewline(interactiveCommand),
+                SessionDiagnostics = DescribeInteractive,
                 Resize = (width, height) =>
                 {
                     try { if (interactiveSession != null) interactiveSession.Resize(width, height); }

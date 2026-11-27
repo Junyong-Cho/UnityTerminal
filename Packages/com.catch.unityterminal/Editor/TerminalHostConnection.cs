@@ -37,6 +37,9 @@ namespace UnityTerminal
         private byte[] pendingBuffer, pendingScreen;
         private string pendingScreenId;
         private int queuedCharacters;
+        // Diagnostics only: when the last request/response with the host finished, and reconnects so far.
+        private DateTime lastExchangeUtc;
+        private int reconnects;
 
         internal TerminalHostConnection(HostResumeInfo options, bool resume)
         {
@@ -49,6 +52,29 @@ namespace UnityTerminal
         internal bool IsReady { get { lock (gate) return ready && !stopping; } }
         internal string Failure { get { lock (gate) return failure ?? (state != null && state.Failure != "" ? state.Failure : null); } }
         internal HostState State { get { lock (gate) return state; } }
+
+        // One-line state summary for the interactive view's "Copy diagnostics".
+        internal string Describe()
+        {
+            lock (gate)
+            {
+                var text = new System.Text.StringBuilder();
+                text.Append("connection ready=").Append(ready).Append(" stopping=").Append(stopping)
+                    .Append(" failure=").Append(failure ?? "-").Append(" reconnects=").Append(reconnects)
+                    .Append(" pending=").Append(pending.Count).Append(" inFlight=").Append(inFlight.Count)
+                    .Append(" queuedChars=").Append(queuedCharacters)
+                    .Append(" lastExchange=").Append(lastExchangeUtc == default(DateTime) ? "never" : (DateTime.UtcNow - lastExchangeUtc).TotalMilliseconds.ToString("0") + "ms ago");
+                if (state != null)
+                    text.Append("\nhost pid=").Append(state.HostPid).Append(" acknowledged=").Append(state.Acknowledged)
+                        .Append(" screenVersion=").Append(state.ScreenVersion).Append(" interactiveId=").Append(state.InteractiveId)
+                        .Append(" interactivePid=").Append(state.InteractivePid).Append(" active=").Append(state.InteractiveActive)
+                        .Append(" exited=").Append(state.InteractiveExited).Append(" failure=").Append(state.Failure == "" ? "-" : state.Failure)
+                        .Append(" appFailure=").Append(state.InteractiveFailure == "" ? "-" : state.InteractiveFailure)
+                        .Append(" notice=").Append(state.Notice == "" ? "-" : state.Notice);
+                else text.Append("\nhost state=none");
+                return text.ToString();
+            }
+        }
 
         internal bool Send(HostCommandKind kind, string id, string text, int columns, int rows, out string error)
         {
@@ -127,6 +153,7 @@ namespace UnityTerminal
                         }
                         HostState update = Exchange(connected, bufferVersion, screenVersion, screenId, commands);
                         AcceptState(update);
+                        lock (gate) lastExchangeUtc = DateTime.UtcNow;
                         lock (gate) DiscardAcknowledged(update.Acknowledged);
                         if (update.Buffer != null) bufferVersion = update.BufferVersion;
                         if (update.Screen != null) { screenVersion = update.ScreenVersion; screenId = update.InteractiveId; }
@@ -136,6 +163,7 @@ namespace UnityTerminal
                 {
                     if (stopping) return;
                     lock (gate) ready = false;
+                    lock (gate) reconnects++;
                     if (!HostAlive() || retry.ElapsedMilliseconds > 15000)
                     { lock (gate) failure = "Terminal host connection: " + ex.Message; return; }
                     Thread.Sleep(100);

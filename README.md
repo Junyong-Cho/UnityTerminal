@@ -22,7 +22,7 @@ Codex CLI가 설치되어 선택한 셸에서 실행 가능하다면, 기존 명
 
 대화형 화면은 기본 셸 화면과 분리됩니다. 실행 중에는 기존 셸 프로세스와 기본 출력 버퍼를 유지하며, 종료하거나 `Stop`을 누르면 기존 로그·스크롤·입력 커서·선택 상태로 복귀합니다. 대화형 화면의 출력과 정상 종료 메시지는 기본 로그에 합치지 않습니다. 입력란에서 실행한 대화형 명령은 소비되므로 복귀 시 빈 프롬프트가 표시됩니다.
 
-대화형 화면은 방향키, Tab, Enter, Esc, Ctrl+C, Ctrl+V 붙여넣기, Ctrl+Shift+C 복사와 창 크기 변경을 전달합니다. 마우스로 텍스트를 드래그해 선택하거나 우클릭 메뉴로 복사·붙여넣기할 수 있습니다. 선택한 글은 앱이 출력을 갱신하거나 Unity가 스크립트를 재로드해도 유지됩니다. 재로드 뒤 화면 크기가 달라 선택 당시 내용을 복원할 수 없으면 선택을 해제합니다. 선택이 있을 때 **Ctrl+C**는 복사하고 선택이 없으면 앱에 중단 신호를 보냅니다. 선택 중에는 선택 당시 화면을 표시하며, 새 입력이나 스크롤·다시 클릭으로 최신 화면으로 돌아갑니다. `Stop`은 현재 대화형 프로세스와 자식 프로세스를 종료합니다. 일반 명령 입력 모드의 Tab 경로 완성과 히스토리는 유지됩니다.
+대화형 화면은 방향키, Tab, Enter, Esc, Ctrl+C, Ctrl+V 붙여넣기, Ctrl+Shift+C 복사와 창 크기 변경을 전달합니다. 마우스로 텍스트를 드래그해 선택하거나 우클릭 메뉴로 복사·붙여넣기할 수 있습니다. 입력이 먹통처럼 보일 때는 우클릭 메뉴의 **Copy diagnostics**로 그 순간의 포커스·한글 조합·선택과 스크롤·마지막 입력과 화면 갱신 시각·호스트 연결 상태를 클립보드에 복사할 수 있습니다. 선택한 글은 앱이 출력을 갱신하거나 Unity가 스크립트를 재로드해도 유지됩니다. 재로드 뒤 화면 크기가 달라 선택 당시 내용을 복원할 수 없으면 선택을 해제합니다. 선택이 있을 때 **Ctrl+C**는 복사하고 선택이 없으면 앱에 중단 신호를 보냅니다. 선택 중에는 선택 당시 화면을 표시하며, 새 입력이나 스크롤·다시 클릭으로 최신 화면으로 돌아갑니다. `Stop`은 현재 대화형 프로세스와 자식 프로세스를 종료합니다. 일반 명령 입력 모드의 Tab 경로 완성과 히스토리는 유지됩니다.
 
 대화형 화면에서도 마우스 휠로 위·아래를 확인할 수 있습니다. WSL 셸처럼 일반 화면을 사용하는 앱에서는 저장된 출력 기록을 스크롤하며, `Shift+PageUp`·`Shift+PageDown`으로 페이지 이동, `Shift+Home`·`Shift+End`로 처음·최신 출력으로 이동합니다. 문자를 입력하면 최신 출력으로 돌아옵니다. Codex처럼 대체 화면을 사용하는 전체화면 앱에서는 휠을 `PageUp`·`PageDown`으로 전달하므로 앱이 관리하는 기록을 페이지 단위로 이동합니다. 작은 터치패드 움직임도 누적해서 처리합니다.
 
@@ -33,6 +33,16 @@ PowerShell과 Codex·WSL 세션은 별도의 숨김 호스트 프로세스에서
 처음 실행할 때 Windows 기본 제공 PowerShell과 .NET Framework 컴파일러로 호스트를 빌드하고 `Library/UnityTerminal/Host`에 캐시합니다. 별도 SDK 설치나 다운로드는 필요하지 않으며, 통신은 현재 Windows 사용자만 접근 가능한 로컬 명명된 파이프를 사용합니다. `Stop`은 현재 대화형 앱을 종료하고, `Restart`·셸 변경·터미널 창 닫기는 해당 창의 전체 세션을 종료합니다. Unity 종료 시에도 호스트와 프로세스 트리를 정리합니다. Unity를 완전히 종료한 뒤의 세션 복원은 지원하지 않습니다.
 
 **백그라운드 자동 컴파일:** Unity의 Auto Refresh는 에디터 창으로 돌아올 때만 변경을 가져옵니다. **Tools → Background Auto Refresh**를 켜면 에디터가 백그라운드에 있어도 `Assets`·`Packages`의 변경을 감지해 새로고침과 컴파일을 진행합니다. 기본값은 꺼짐입니다. 켜고 끈 설정은 프로젝트마다 `UserSettings/EditorUserSettings.asset`에 저장되며, 일반적인 Unity `.gitignore`에서는 저장소에 올라가지 않습니다. 에디터가 포커스를 가진 동안, Play 모드, 컴파일·임포트 중에는 동작하지 않으며 Preferences의 Auto Refresh가 꺼져 있으면 따릅니다. `~`로 끝나는 폴더와 `.`으로 시작하는 경로, `.meta` 파일의 변경은 무시합니다.
+
+**진단 캡처:** 터미널이 먹통처럼 보이는 등 문제가 생기면 그 상태에서 **Tools → Unity Terminal → Capture Diagnostics**를 실행합니다. 프로젝트의 `Logs/UnityTerminal/diagnostics-<시각>.txt`에 그 순간의 내부 상태를 저장하고, 경로를 Console에 출력하며 클립보드에 복사합니다. **Open Diagnostics Folder**로 폴더를 열 수 있습니다. 저장 내용은 다음과 같습니다.
+
+- 각 터미널 창의 상태: 포커스·크기·셸·작업 경로·입력 중인 내용, 기본 셸 연결과 최근 출력 200줄
+- 대화형 세션: 시작 명령, 앱 프로세스, 호스트 연결(대기 입력·마지막 교환 시각·재연결 횟수)
+- 대화형 화면: 포커스·한글 조합·선택과 스크롤 상태, 최근 입력 처리 기록 256건(키가 앱에 전달됐는지, 포커스를 되찾았는지), 화면과 스크롤백 텍스트
+- 호스트 프로세스: Unity에서 받은 최근 명령 300건, 앱의 최근 원본 출력 64KB(ESC 등 제어 문자 표시), 앱 입력 쓰기·출력 읽기 진행(대기 중인 입력, 마지막 쓰기·읽기 시각), Unity 연결 여부, 명령 처리나 메인 루프가 멈춘 경우 그 명령과 경과 시간. 호스트가 멈춘 상태여도 별도 스레드가 응답합니다
+- 마지막 스크립트 재로드 이후의 Unity 오류·예외
+
+화면에 표시된 내용이 그대로 들어가므로 공유하기 전에 확인하세요. 파일은 최근 20개만 남깁니다. 호스트 정보는 이 기능이 들어간 버전의 호스트에서만 기록되므로, 업데이트 전에 시작한 세션은 **Restart** 후 사용합니다.
 
 **호스트 빌드 제약:** 호스트는 `Host~/Build-Host.ps1`이 Windows PowerShell 5.1(`powershell.exe`)의 `Add-Type`으로 컴파일합니다. 터미널에서 PowerShell 7을 선택해도 빌드는 항상 5.1로 하며, 이 컴파일러는 **C# 5 문법까지만** 지원합니다. 따라서 호스트와 공유하는 `ShellSession.cs`, `ShellCatalog.cs`, `ConPtySession.cs`, `TerminalScreen.cs`, `TerminalBuffer.cs`, `AnsiParser.cs`, `TerminalHostProtocol.cs`와 `Host~/TerminalSessionHost.cs`에는 문자열 보간(`$"..."`), `?.`·`??=`, `nameof`, 식 본문 멤버, 패턴 매칭 같은 C# 6 이후 문법을 쓰면 안 됩니다. `async`/`await`는 사용할 수 있습니다. Unity 쪽 컴파일은 성공하고 호스트 빌드만 실패하므로, 공유 파일을 고친 뒤에는 터미널 창을 다시 열어 호스트가 새로 빌드되는지 확인합니다. 공유 파일을 추가하거나 빼면 `Build-Host.ps1`의 컴파일 목록과 `Editor/HostedTerminalSession.cs`의 캐시 해시 목록을 **함께** 수정합니다. 해시 목록에서 빠진 파일은 내용이 바뀌어도 캐시된 예전 호스트가 계속 쓰입니다.
 
@@ -95,6 +105,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File ./Packages/com.catch.unityte
 PowerShell 7이 설치된 환경에서는 `Tests~/Run-ShellSelectionTests.ps1`로 5.1과 7의 일반/ConPTY 실행 및 한글 입출력을 검사합니다. Unity의 Codex 회귀 검사도 7로 실행하려면 `Temp/RunInteractiveGuiProbe` 파일 내용에 `PowerShell7`을 기록합니다.
 
 세션 유지와 로컬 호스트 검사는 `powershell -NoProfile -ExecutionPolicy Bypass -File ./Packages/com.catch.unityterminal/Tests~/Run-HostTests.ps1`로 실행합니다. 연결이 끊긴 동안의 출력 수집, 같은 프로세스로 재연결, 화면·셸 변수 유지, 미확인 입력의 중복 방지와 종료 시 자식 프로세스 정리를 확인합니다. 임시 실행 파일은 프로젝트 `Temp` 안에 생성하고 검사 후 삭제합니다.
+
+대화형 입력 포커스 검사는 `Tests~/TerminalFocusRegressionProbe.cs`를 `Assets/Editor`에 복사하고 `Temp/RunTerminalFocusProbe`를 만든 뒤 **Assets → Refresh**로 시작합니다. 툴바처럼 대화형 화면 앞에 그려지는 컨트롤 수가 바뀌어도 키 입력이 계속 전달되는지, 사용자가 다른 입력란으로 포커스를 옮기면 그 입력란이 키를 받고 화면을 다시 클릭하면 돌아오는지 검사합니다. 셸 명령은 실행하지 않으며 결과는 `Temp/TerminalFocusProbe.result.txt`에 저장합니다. 검사 후 복사한 스크립트를 삭제합니다.
 
 스크롤 검사는 `Tests~/TerminalScrollProbe.cs`를 `Assets/Editor`에 복사하고 `Temp/RunTerminalScrollProbe`를 만든 뒤 **Assets → Refresh**로 시작합니다. 별도 창이나 키보드 입력 없이 출력 기록의 이동 방향과 경계, 터치패드 누적, 키보드 이동과 전체화면 앱의 페이지 입력을 검사합니다. 결과는 `Temp/TerminalScrollProbe.result.txt`에 기록하며, 검사 후 복사한 스크립트를 삭제합니다.
 

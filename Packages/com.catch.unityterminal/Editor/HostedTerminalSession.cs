@@ -77,6 +77,20 @@ namespace UnityTerminal
         internal int ProcessId { get { var state = connection.State; return state != null && state.InteractiveId == Id ? state.InteractivePid : 0; } }
         internal int HostProcessId { get { var state = connection.State; return state == null ? 0 : state.HostPid; } }
         internal string Notice { get { var state = connection.State; return state == null ? null : state.Notice; } }
+
+        // State summary for the interactive view's "Copy diagnostics".
+        internal string Describe()
+        {
+            int pid = ProcessId;
+            string alive = "unknown";
+            if (pid != 0)
+            {
+                try { using (var process = Process.GetProcessById(pid)) alive = process.HasExited ? "exited" : "running"; }
+                catch (ArgumentException) { alive = "not found"; }
+                catch (InvalidOperationException) { alive = "not found"; }
+            }
+            return "session id=" + Id + " disposed=" + disposed + " appPid=" + pid + " (" + alive + ")\n" + connection.Describe();
+        }
         public string Failure
         {
             get

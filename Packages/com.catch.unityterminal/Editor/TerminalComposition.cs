@@ -19,6 +19,12 @@ namespace UnityTerminal
 
         public void Reset() { previouslyActive = activeBeforeControl = commitPending = lastCompositionHangul = false; }
 
+        public string Describe()
+        {
+            return "composition active=" + previouslyActive + " beforeControl=" + activeBeforeControl +
+                " commitPending=" + commitPending + " lastHangul=" + lastCompositionHangul;
+        }
+
         public bool ConsumesNavigation(Event e)
         {
             bool active = Sample();
