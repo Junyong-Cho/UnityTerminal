@@ -154,7 +154,7 @@ namespace UnityTerminal.Tests
                             SendKey(0x0D); // Korean IME: Enter commits the syllable and is forwarded once.
                         }
                         break;
-                    default:
+                    case 6:
                         if (native)
                         {
                             Require(sent.ToString() == "\uD55C\uAE00\r", "Native interactive Korean commit + Enter: " + Escape(sent.ToString()));
@@ -163,6 +163,17 @@ namespace UnityTerminal.Tests
                             SendEvent(new Event { type = EventType.KeyUp, keyCode = KeyCode.Return, character = '\r' });
                             Require(sent.ToString() == "\uD55C\uAE00\r\r", "A later Enter was swallowed or duplicated");
                             trace.AppendLine("PASS: the next Enter is forwarded normally after composition");
+                            // \uAC00\uB098 -> Backspace x2 erases the composing \uB098 (no commit) -> the third Backspace must
+                            // reach the app and delete \uAC00, not be taken as accepting a commit.
+                            sent.Length = 0;
+                            TypeAtTypingSpeed('R', 'K', 'S', 'K', 0x08, 0x08, 0x08);
+                        }
+                        break;
+                    default:
+                        if (native)
+                        {
+                            Require(sent.ToString() == "\uAC00\x7f", "Backspace after erasing the composition: " + Escape(sent.ToString()));
+                            trace.AppendLine("PASS: after Backspace erases the composing syllable, the next Backspace deletes the previous character");
                         }
                         Finish("PASS: Korean input and IME focus lifecycle" + (native ? " including native keyboard composition" : " (native IME not requested)"));
                         return;
@@ -299,6 +310,15 @@ namespace UnityTerminal.Tests
             var inputs = new[] { new NativeInput { Type = 1, Key = new KeyInput { VirtualKey = (ushort)key } },
                 new NativeInput { Type = 1, Key = new KeyInput { VirtualKey = (ushort)key, Flags = 2 } } };
             Require(SendInput(2, inputs, Marshal.SizeOf(typeof(NativeInput))) == 2, "Native key injection failed");
+        }
+        // Keys 40 ms apart, like fast typing; keys sent with no gap at all can be dropped by the IME itself.
+        private static void TypeAtTypingSpeed(params int[] keys)
+        {
+            new System.Threading.Thread(() =>
+            {
+                try { foreach (int key in keys) { SendKey(key); System.Threading.Thread.Sleep(40); } }
+                catch (Exception) { } // the stage check reports what arrived
+            }).Start();
         }
         private void Press(char c)
         {
