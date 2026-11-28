@@ -133,6 +133,87 @@ namespace UnityTerminal.Tests
             Equal("\x1bOA", TerminalInput.Encode(TerminalKey.Up, '\0', false, false, false, true));
             Equal("\x1b[1;5D", TerminalInput.Encode(TerminalKey.Left, '\0', false, false, true, false));
             Equal("\x1b[Z", TerminalInput.Encode(TerminalKey.Tab, '\t', true, false, false, false));
+            // Click-to-move: Left/Right per glyph on the cursor row.
+            var ascii = new TerminalScreen(20, 2); ascii.Feed("> abc def");
+            Equal(string.Concat(System.Linq.Enumerable.Repeat("\x1b[D", 5)), TerminalInput.CursorMoveKeys(ascii.GetLine(0), 9, 4, false));
+            Equal("\x1b[C\x1b[C", TerminalInput.CursorMoveKeys(ascii.GetLine(0), 2, 4, false));
+            Equal("\x1bOD", TerminalInput.CursorMoveKeys(ascii.GetLine(0), 5, 4, true));
+            Equal("", TerminalInput.CursorMoveKeys(ascii.GetLine(0), 9, 9, false));
+            Equal("", TerminalInput.CursorMoveKeys(ascii.GetLine(0), 9, 15, false)); // past the text: stays at the end
+            Equal("\x1b[C\x1b[C", TerminalInput.CursorMoveKeys(ascii.GetLine(0), 7, 19, false)); // clamped to just after "f"
+            var spaces = new TerminalScreen(20, 2); spaces.Feed("> abc   ");           // typed trailing spaces end at column 8
+            Equal("\x1b[C\x1b[C\x1b[C", TerminalInput.CursorMoveKeys(spaces.GetLine(0), 2, 8, false));    // unknown reach: clamped after "c"
+            Equal(string.Concat(System.Linq.Enumerable.Repeat("\x1b[C", 6)), TerminalInput.CursorMoveKeys(spaces.GetLine(0), 2, 8, false, 8)); // reached: spaces count
+            Equal(string.Concat(System.Linq.Enumerable.Repeat("\x1b[C", 6)), TerminalInput.CursorMoveKeys(spaces.GetLine(0), 2, 15, false, 8)); // never past the reach
+            // Typed trailing spaces (TerminalInput.TrailingSpaces): keys sent, screen echoes, repaints.
+            // paint(screen, tracker, settled) is what the view does on each repaint.
+            Action<TerminalScreen, TerminalInput.TrailingSpaces, bool> paint = (s, t, settled) => t.OnRepaint(s.CursorY, s.CursorX, s.GetLine(s.CursorY), settled);
+            Func<TerminalScreen> typedScreen = () => { var s = new TerminalScreen(30, 3); s.Feed("> abc   "); return s; };   // cursor 8, text end 5
+            Func<TerminalScreen, TerminalInput.TrailingSpaces> settledOn = s => { var t = new TerminalInput.TrailingSpaces(); paint(s, t, true); return t; };
+            const string left3 = "\x1b[D\x1b[D\x1b[D";
+            {
+                var s = typedScreen(); var t = settledOn(s);
+                Equal("3", t.Count.ToString());
+                t.OnSent(left3 + left3); s.Feed("\x1b[6D"); paint(s, t, false);
+                t.OnSent("\x1b[3~"); s.Feed("\x1b[P"); paint(s, t, false); paint(s, t, true);
+                Equal("3", t.Count.ToString());                                        // Delete "a" at the start: spaces stay
+            }
+            {
+                var s = typedScreen(); var t = settledOn(s);
+                t.OnSent("\x7f\x7f\x7f"); paint(s, t, false);                     // repaint before the echo
+                s.Feed("\b \b"); paint(s, t, false); s.Feed("\b \b\b \b"); paint(s, t, true);
+                Equal("0", t.Count.ToString());                                        // Backspace the spaces, echoed in parts
+            }
+            {
+                var s = typedScreen(); var t = settledOn(s);
+                t.OnSent(left3); s.Feed("\x1b[3D"); t.OnSent("\x7f"); s.Feed("\b\x1b[P"); paint(s, t, true);
+                Equal("3", t.Count.ToString());                                        // Backspace "c" just before the spaces
+            }
+            {
+                var s = typedScreen(); var t = settledOn(s);
+                t.OnSent(left3); s.Feed("\x1b[3D"); t.OnSent("\x1b[3~"); s.Feed("\x1b[P"); paint(s, t, true);
+                Equal("2", t.Count.ToString());                                        // Delete the first space from there
+            }
+            {
+                var s = new TerminalScreen(30, 3); s.Feed("> abc"); var t = settledOn(s);
+                t.OnSent(" "); t.OnSent("\x7f");
+                s.Feed(" "); paint(s, t, false); s.Feed("\b \b"); paint(s, t, false); paint(s, t, true);
+                Equal("0", t.Count.ToString());                                        // space and Backspace echoed separately
+            }
+            {
+                var s = typedScreen(); var t = settledOn(s);
+                t.OnSent("\x1b[D\x1b[D" + "x");
+                Equal("2", t.Count.ToString());                                        // "x" typed after one space
+                t.OnSent("\r"); Equal("0", t.Count.ToString());                         // submitted
+            }
+            {
+                var s = typedScreen(); var t = settledOn(s);
+                t.OnSent("\x1b[H\x7f"); Equal("2", t.Count.ToString());                // position unknown: only lowers
+                t.OnSent("\x1b[1;5C "); Equal("2", t.Count.ToString());
+                t.OnSent("\x1b[F\x7f"); Equal("1", t.Count.ToString());                // End is known again
+            }
+            {
+                var s = typedScreen(); var t = settledOn(s);
+                t.OnSent("\x1b[C"); Equal("0", t.Count.ToString());                    // Right at the end may accept a suggestion
+                s = typedScreen(); t = settledOn(s);
+                s.Feed("\r\x1b[K> ab"); paint(s, t, true); Equal("0", t.Count.ToString());  // app redrew the row itself
+                s = typedScreen(); t = settledOn(s);
+                s.Feed("\r\n"); paint(s, t, true); Equal("0", t.Count.ToString());           // another row
+            }
+            {
+                var s = new TerminalScreen(30, 3); s.Feed("> \uD55C\uAE00  "); var t = settledOn(s);   // text end 6, cursor 8
+                Equal("2", t.Count.ToString());
+                t.OnSent(left3 + "\x1b[3~"); s.Feed("\x1b[3D\x1b[2P"); paint(s, t, true);   // Delete the wide glyph before the spaces
+                Equal("2", t.Count.ToString());
+            }
+            {
+                var t = new TerminalInput.TrailingSpaces();
+                Assert(t.OnSent("\x1b[D\x1b[C\x1bOD\x1b[1;5D\x1b[F\x1b[H") == false, "Navigation is not an edit");
+                Assert(t.OnSent(" ") && t.OnSent("\x7f") && t.OnSent("\x1b[3~") && t.OnSent("\r"), "Spaces, deletions and resets are edits");
+            }
+            var wide = new TerminalScreen(20, 2); wide.Feed("> 한글ab");      // 한 = cells 2-3, 글 = 4-5
+            Equal("\x1b[D\x1b[D\x1b[D\x1b[D", TerminalInput.CursorMoveKeys(wide.GetLine(0), 8, 3, false)); // right half of 한 -> before 한
+            Equal("\x1b[C\x1b[C", TerminalInput.CursorMoveKeys(wide.GetLine(0), 2, 4, false) + TerminalInput.CursorMoveKeys(wide.GetLine(0), 4, 6, false));
             // Backspace deletes a character; Ctrl+Backspace deletes the previous word as ^W.
             Equal("\x7f", TerminalInput.Encode(TerminalKey.Backspace, '\0', false, false, false, false));
             Equal("\x17", TerminalInput.Encode(TerminalKey.Backspace, '\0', false, false, true, false));

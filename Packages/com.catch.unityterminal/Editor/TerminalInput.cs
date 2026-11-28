@@ -217,6 +217,170 @@ namespace UnityTerminal
             return -1;
         }
 
+        // Click-to-move: the Left/Right keys that move the app's cursor from cursorX to targetX on the same
+        // row. Apps do not agree on mouse clicks (Codex moves its cursor on an SGR click, Claude Code ignores
+        // it), but they all move by arrow keys. One key per glyph, so a wide (Korean) glyph is one key.
+        // The target is limited to the furthest of: just after the row's last non-blank glyph, the cursor,
+        // and reachedX (the furthest column the cursor reached on this row, so typed trailing spaces stay
+        // reachable). Past that, Right at the end of the input can accept an inline suggestion (PSReadLine
+        // predictions, fish). Up/Down are never sent: they often mean history.
+        public static string CursorMoveKeys(ScreenCell[] line, int cursorX, int targetX, bool applicationCursor, int reachedX = -1)
+        {
+            if (line == null || line.Length == 0) return "";
+            cursorX = Math.Max(0, Math.Min(cursorX, line.Length - 1));
+            targetX = Math.Max(0, Math.Min(targetX, line.Length - 1));
+            int lastText = -1;
+            for (int x = line.Length - 1; x >= 0 && lastText < 0; x--)
+                if (line[x].Width != 0 && string.IsNullOrEmpty(line[x].Text) == false && line[x].Text != " ") lastText = x + Math.Max(1, line[x].Width) - 1;
+            int limit = Math.Max(Math.Max(lastText + 1, cursorX), Math.Min(reachedX, line.Length - 1));
+            if (targetX > limit) targetX = limit;
+            while (targetX > 0 && targetX < line.Length && line[targetX].Width == 0) targetX--; // right half of a wide glyph
+            int glyphs = 0;
+            int from = Math.Min(cursorX, targetX), to = Math.Max(cursorX, targetX);
+            for (int x = from; x < to && x < line.Length; x++) if (line[x].Width != 0) glyphs++;
+            if (glyphs == 0) return "";
+            string key = Encode(targetX > cursorX ? TerminalKey.Right : TerminalKey.Left, '\0', false, false, false, applicationCursor);
+            var keys = new StringBuilder(key.Length * glyphs);
+            for (int i = 0; i < glyphs; i++) keys.Append(key);
+            return keys.ToString();
+        }
+
+        // Click-to-move must not send Right past the end of the input (at the end it can accept a PSReadLine
+        // prediction or a fish suggestion), but typed trailing spaces look exactly like empty cells. The screen
+        // alone cannot count them: deleting a space and moving left over it look the same, and the screen lags
+        // behind input because apps echo later, sometimes in parts. So this models the input line from the keys
+        // sent: the cursor position relative to the text end and the trailing spaces, updated per key by what that
+        // key does at that position (Backspace removes left of the cursor, Delete right of it). The screen is
+        // only read once input has been quiet for a while (settled), when it shows every key's effect.
+        // When unsure it undercounts, which just makes a click stop short.
+        internal sealed class TrailingSpaces
+        {
+            public int Row { get { return row; } }
+            public int Count { get { return count; } }
+
+            private int row = -1, textEnd = -1, count;
+            private int offset;          // cursor relative to the text end: cells when >= 0, glyphs (negative) inside the text
+            private bool offsetKnown, editedSinceSettled;
+
+            private enum Key { Space, Text, Backspace, Delete, Left, Right, End, Lost, Reset }
+
+            // Returns true when the input can have changed the text (anything but pure cursor movement).
+            public bool OnSent(string text)
+            {
+                bool edited = false;
+                for (int i = 0; i < text.Length; )
+                {
+                    int length;
+                    Key key = Next(text, i, out length);
+                    i += length;
+                    if (key != Key.Left && key != Key.Right && key != Key.End && key != Key.Lost) edited = editedSinceSettled = true;
+                    Apply(key);
+                    if (key == Key.Reset) break;
+                }
+                return edited;
+            }
+
+            // Called on every repaint; only a settled screen (no input sent for a while, so it shows every
+            // key's effect) is read. While apps are still echoing, the cursor can briefly sit elsewhere
+            // (Claude redraws its whole input box), so an unsettled screen says nothing reliable. On a settled
+            // screen: another row starts over; a changed text end with no edit sent since the last settled
+            // screen means the app redrew the row itself, which also starts over; the cursor position is then
+            // taken from the screen, and a cursor past the text end proves that many spaces.
+            public void OnRepaint(int cursorRow, int cursorX, ScreenCell[] line, bool settled)
+            {
+                if (settled == false) return;
+                int end = TextEnd(line);
+                if (cursorRow != row) { row = cursorRow; count = 0; }
+                else if (end != textEnd && editedSinceSettled == false) count = 0;
+                textEnd = end;
+                editedSinceSettled = false;
+                if (cursorX >= end) offset = cursorX - end;
+                else
+                {
+                    offset = 0;
+                    for (int x = cursorX; x < end && x < line.Length; x++) if (line[x].Width != 0) offset--;
+                }
+                offsetKnown = true;
+                if (offset > count) count = offset;   // only typed input can put the cursor there
+            }
+
+            private void Apply(Key key)
+            {
+                switch (key)
+                {
+                    case Key.Reset: count = 0; offsetKnown = false; return;
+                    case Key.Lost: offsetKnown = false; return;
+                    case Key.End: offset = count; offsetKnown = true; return;
+                }
+                if (offsetKnown == false)
+                {
+                    // Position unknown: only ever lower the count.
+                    if (key == Key.Text) count = 0;
+                    else if (key == Key.Backspace || key == Key.Delete) count = Math.Max(0, count - 1);
+                    return;
+                }
+                switch (key)
+                {
+                    case Key.Left: offset--; return;
+                    case Key.Right:
+                        if (offset < count) offset++;
+                        else { count = 0; offset = 0; }    // at the end: may have accepted a suggestion
+                        return;
+                    case Key.Space: if (offset >= 0) { count++; offset++; } return;     // inside the text both shift together
+                    case Key.Text: if (offset >= 0) { count = Math.Max(0, count - offset); offset = 0; } return;
+                    case Key.Backspace: if (offset > 0) { count--; offset--; } return;  // at the text end it removes a glyph
+                    case Key.Delete:
+                        if (offset >= 0) { if (offset < count) count--; }
+                        else offset++;                      // removes a glyph after the cursor: the text end comes closer
+                        return;
+                }
+            }
+
+            private static readonly string[] Lefts = { "\x1b[D", "\x1bOD" }, Rights = { "\x1b[C", "\x1bOC" }, Ends = { "\x1b[F", "\x1bOF" }, Homes = { "\x1b[H", "\x1bOH" };
+
+            private static Key Next(string text, int i, out int length)
+            {
+                char c = text[i];
+                length = 1;
+                if (c == '\x7f' || c == '\b') return Key.Backspace;
+                if (c == '\x1b')
+                {
+                    length = 4;
+                    if (string.CompareOrdinal(text, i, "\x1b[3~", 0, 4) == 0) return Key.Delete;
+                    length = 3;
+                    if (Matches(text, i, Lefts)) return Key.Left;
+                    if (Matches(text, i, Rights)) return Key.Right;
+                    if (Matches(text, i, Ends)) return Key.End;
+                    if (Matches(text, i, Homes)) return Key.Lost;
+                    // Modified Left/Right/Home (word moves): position no longer known. Modified End: still the end.
+                    if (string.CompareOrdinal(text, i, "\x1b[1;", 0, 4) == 0 && i + 5 < text.Length && char.IsDigit(text[i + 4]))
+                    {
+                        length = 6;
+                        if (text[i + 5] == 'F') return Key.End;
+                        if ("DCH".IndexOf(text[i + 5]) >= 0) return Key.Lost;
+                    }
+                    length = text.Length - i;
+                    return Key.Reset;
+                }
+                if (c < ' ') { length = text.Length - i; return Key.Reset; }
+                return c == ' ' ? Key.Space : Key.Text;
+            }
+
+            private static bool Matches(string text, int i, string[] keys)
+            {
+                foreach (string key in keys) if (string.CompareOrdinal(text, i, key, 0, key.Length) == 0) return true;
+                return false;
+            }
+        }
+
+        // Column just after the row's last non-blank glyph (0 for a blank row); no allocation.
+        internal static int TextEnd(ScreenCell[] line)
+        {
+            for (int x = line.Length - 1; x >= 0; x--)
+                if (line[x].Width != 0 && string.IsNullOrEmpty(line[x].Text) == false && line[x].Text != " ") return x + Math.Max(1, line[x].Width);
+            return 0;
+        }
+
         // Shift+Enter as a "new line, don't submit" key; see AltEnterNewlinePrograms.
         public static string EncodeShiftEnter(bool altEnterNewline, bool applicationCursor)
         {

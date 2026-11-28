@@ -135,6 +135,7 @@ namespace UnityTerminal
         {
             bounds = rect;
             lastWindowFocused = windowFocused;
+            if (Event.current.type == EventType.Repaint && scrollBack == 0) TrackCursorReach();
             // Sample before this event's TextField and focus recovery run: both can change focus, which
             // would hide a lost-focus state from the diagnostics and the input trace.
             preKeyboardControl = GUIUtility.keyboardControl;
@@ -392,6 +393,9 @@ namespace UnityTerminal
                 }
                 else if (mouse.button == 0)
                 {
+                    clickModifiers = mouse.modifiers;
+                    clickDragged = false;
+                    clickCount = mouse.clickCount;
                     SnapshotSelection();
                     selectionStart = selectionEnd = CellAt(mouse.mousePosition);
                     selecting = true;
@@ -400,9 +404,17 @@ namespace UnityTerminal
                 e.Use(); return true;
             }
             if (selecting && mouse.type == EventType.MouseDrag)
-            { selectionEnd = CellAt(mouse.mousePosition); e.Use(); return true; }
+            {
+                int cell = CellAt(mouse.mousePosition);
+                if (cell != selectionStart) clickDragged = true; // even if it later returns to the start cell
+                selectionEnd = cell; e.Use(); return true;
+            }
             if (selecting && mouse.type == EventType.MouseUp)
-            { selecting = false; GUIUtility.hotControl = 0; if (!HasSelection) selectionLines = null; e.Use(); return true; }
+            {
+                selecting = false; GUIUtility.hotControl = 0;
+                if (!HasSelection) { selectionLines = null; MoveCursorToClick(selectionEnd); }
+                e.Use(); return true;
+            }
             if (e.type == EventType.ScrollWheel && bounds.Contains(e.mousePosition))
             {
                 ScrollWheel(e.delta.y);
@@ -482,11 +494,47 @@ namespace UnityTerminal
             return text.ToString();
         }
 
+        // Click (no drag) on the cursor's row moves the app's cursor there with Left/Right keys; see
+        // TerminalInput.CursorMoveKeys. Clicks elsewhere (menus, output, other composer lines), with a
+        // modifier, double clicks, while scrolled back or composing send nothing.
+        private EventModifiers clickModifiers;
+        private int clickCount;
+        private bool clickDragged;
+        // Typed trailing spaces on the cursor row (blank on screen), so a click can reach them; see
+        // TerminalInput.TrailingSpaces. EchoWindow: how long after input the screen may still be catching up.
+        private readonly TerminalInput.TrailingSpaces trailing = new TerminalInput.TrailingSpaces();
+        private DateTime lastInputUtc = DateTime.MinValue;
+        private static readonly TimeSpan EchoWindow = TimeSpan.FromSeconds(1);
+
+        private void TrackCursorReach()
+        {
+            DateTime now = DateTime.UtcNow;
+            trailing.OnRepaint(screen.CursorY, screen.CursorX, screen.GetLine(screen.CursorY), now - lastInputUtc >= EchoWindow);
+        }
+
+        private void TrackSentInput(string text)
+        {
+            if (text.Length == 0) return;
+            lastInputUtc = DateTime.UtcNow;
+            trailing.OnSent(text);
+        }
+
+        private void MoveCursorToClick(int cell)
+        {
+            if (cell < 0 || clickDragged || clickCount > 1 || (clickModifiers & (EventModifiers.Shift | EventModifiers.Control | EventModifiers.Alt | EventModifiers.Command)) != 0) return;
+            if (scrollBack != 0 || screen.CursorVisible == false || composing || Input.compositionString.Length > 0) return;
+            int row = cell / screen.Columns, column = cell % screen.Columns;
+            if (row != screen.CursorY) return;
+            string keys = TerminalInput.CursorMoveKeys(screen.GetLine(row), screen.CursorX, column, screen.ApplicationCursor, row == trailing.Row ? TerminalInput.TextEnd(screen.GetLine(row)) + trailing.Count : -1);
+            if (keys.Length > 0) SendText(keys);
+        }
+
         private void SendText(string text)
         {
             sendCount++;
             lastSendUtc = DateTime.UtcNow;
             if (tracingInput == true) sentThisEvent = sentThisEvent == null ? text : sentThisEvent + text;
+            TrackSentInput(text);
             scrollRemainder = 0;
             scrollBack = 0; selectionStart = selectionEnd = -1; status = null;
             if (Send != null) Send(text);
