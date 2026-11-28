@@ -125,6 +125,8 @@ namespace UnityTerminal.Tests
             ScreenStyle style = screen.GetLine(0)[0].Style;
             Assert(style.Foreground == 0x010203 && style.Background == 0xff0000 && style.Bold && style.Italic && style.Underline && style.Inverse, "SGR attributes are incorrect");
             Assert(screen.GetLine(0)[1].Style.Equals(ScreenStyle.Default), "SGR reset failed");
+            screen.Feed("\x1b[2;1H\x1b[1;2mF\x1b[22mN");
+            Assert(screen.GetLine(1)[0].Style.Dim && screen.GetLine(1)[0].Style.Bold && !screen.GetLine(1)[1].Style.Dim && !screen.GetLine(1)[1].Style.Bold, "SGR 2 faint or its 22 reset is incorrect");
         }
         private static void Keyboard()
         {
@@ -211,6 +213,17 @@ namespace UnityTerminal.Tests
                 Assert(t.OnSent("\x1b[D\x1b[C\x1bOD\x1b[1;5D\x1b[F\x1b[H") == false, "Navigation is not an edit");
                 Assert(t.OnSent(" ") && t.OnSent("\x7f") && t.OnSent("\x1b[3~") && t.OnSent("\r"), "Spaces, deletions and resets are edits");
             }
+            // Faint suggestion after the cursor (Claude's next-prompt suggestion, PSReadLine prediction) is not input:
+            // clicking on it must not send Right, which would accept it.
+            var ghost = new TerminalScreen(40, 2); ghost.Feed("> \x1b[2mrun the tests\x1b[22m\x1b[1;3H");   // empty input, cursor at 2
+            Equal("", TerminalInput.CursorMoveKeys(ghost.GetLine(0), 2, 10, false));
+            Equal("1", TerminalInput.TextEnd(ghost.GetLine(0), 2).ToString());      // just after ">"
+            Equal("15", TerminalInput.TextEnd(ghost.GetLine(0), 15).ToString());    // cursor after it: counted (not a suggestion)
+            var predicted = new TerminalScreen(40, 2); predicted.Feed("> git sta\x1b[2mtus\x1b[22m\x1b[1;10H");   // typed "git sta", cursor at 9
+            Equal("", TerminalInput.CursorMoveKeys(predicted.GetLine(0), 9, 11, false));
+            Equal("\x1b[D\x1b[D\x1b[D", TerminalInput.CursorMoveKeys(predicted.GetLine(0), 9, 6, false));
+            var faintInput = new TerminalScreen(40, 2); faintInput.Feed("> \x1b[2mab\x1b[22mcd");          // faint text before the cursor still counts
+            Equal("\x1b[D\x1b[D\x1b[D", TerminalInput.CursorMoveKeys(faintInput.GetLine(0), 6, 3, false));
             var wide = new TerminalScreen(20, 2); wide.Feed("> 한글ab");      // 한 = cells 2-3, 글 = 4-5
             Equal("\x1b[D\x1b[D\x1b[D\x1b[D", TerminalInput.CursorMoveKeys(wide.GetLine(0), 8, 3, false)); // right half of 한 -> before 한
             Equal("\x1b[C\x1b[C", TerminalInput.CursorMoveKeys(wide.GetLine(0), 2, 4, false) + TerminalInput.CursorMoveKeys(wide.GetLine(0), 4, 6, false));

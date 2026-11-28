@@ -220,7 +220,7 @@ namespace UnityTerminal
         // Click-to-move: the Left/Right keys that move the app's cursor from cursorX to targetX on the same
         // row. Apps do not agree on mouse clicks (Codex moves its cursor on an SGR click, Claude Code ignores
         // it), but they all move by arrow keys. One key per glyph, so a wide (Korean) glyph is one key.
-        // The target is limited to the furthest of: just after the row's last non-blank glyph, the cursor,
+        // The target is limited to the furthest of: just after the row's last non-blank glyph (faint suggestions excluded, see TextEnd), the cursor,
         // and reachedX (the furthest column the cursor reached on this row, so typed trailing spaces stay
         // reachable). Past that, Right at the end of the input can accept an inline suggestion (PSReadLine
         // predictions, fish). Up/Down are never sent: they often mean history.
@@ -229,10 +229,7 @@ namespace UnityTerminal
             if (line == null || line.Length == 0) return "";
             cursorX = Math.Max(0, Math.Min(cursorX, line.Length - 1));
             targetX = Math.Max(0, Math.Min(targetX, line.Length - 1));
-            int lastText = -1;
-            for (int x = line.Length - 1; x >= 0 && lastText < 0; x--)
-                if (line[x].Width != 0 && string.IsNullOrEmpty(line[x].Text) == false && line[x].Text != " ") lastText = x + Math.Max(1, line[x].Width) - 1;
-            int limit = Math.Max(Math.Max(lastText + 1, cursorX), Math.Min(reachedX, line.Length - 1));
+            int limit = Math.Max(Math.Max(TextEnd(line, cursorX), cursorX), Math.Min(reachedX, line.Length - 1));
             if (targetX > limit) targetX = limit;
             while (targetX > 0 && targetX < line.Length && line[targetX].Width == 0) targetX--; // right half of a wide glyph
             int glyphs = 0;
@@ -289,7 +286,7 @@ namespace UnityTerminal
             public void OnRepaint(int cursorRow, int cursorX, ScreenCell[] line, bool settled)
             {
                 if (settled == false) return;
-                int end = TextEnd(line);
+                int end = TextEnd(line, cursorX);
                 if (cursorRow != row) { row = cursorRow; count = 0; }
                 else if (end != textEnd && editedSinceSettled == false) count = 0;
                 textEnd = end;
@@ -373,11 +370,14 @@ namespace UnityTerminal
             }
         }
 
-        // Column just after the row's last non-blank glyph (0 for a blank row); no allocation.
-        internal static int TextEnd(ScreenCell[] line)
+        // Column just after the row's last non-blank glyph that is input (0 for a blank row); no allocation.
+        // Faint (SGR 2) glyphs at or after the cursor are not input: apps draw placeholders and inline
+        // suggestions there that way (Claude Code's "Try ..." and next-prompt suggestion, PSReadLine
+        // predictions), and Right at the real end would accept the suggestion.
+        internal static int TextEnd(ScreenCell[] line, int cursorX)
         {
             for (int x = line.Length - 1; x >= 0; x--)
-                if (line[x].Width != 0 && string.IsNullOrEmpty(line[x].Text) == false && line[x].Text != " ") return x + Math.Max(1, line[x].Width);
+                if (line[x].Width != 0 && string.IsNullOrEmpty(line[x].Text) == false && line[x].Text != " " && (x < cursorX || line[x].Style.Dim == false)) return x + Math.Max(1, line[x].Width);
             return 0;
         }
 

@@ -122,6 +122,15 @@ namespace UnityTerminal.Tests
             Require(copy.GetText() == screen.GetText() && copy.CursorX == screen.CursorX && copy.CursorY == screen.CursorY &&
                 copy.Alternate && copy.CursorShape == 6 && copy.BracketedPaste && copy.GetLine(0)[0].Width == 2,
                 "Display state snapshot lost terminal modes, cursor or Unicode widths");
+            // Dim shares the Inverse byte (bit 1); without Dim the byte is the old 0/1 boolean.
+            var faint = new TerminalScreen(20, 2);
+            faint.Feed("a\x1b[2mb\x1b[7mc\x1b[22md\x1b[0me");
+            var faintCopy = new TerminalScreen(2, 2);
+            TerminalHostProtocol.Decode(TerminalHostProtocol.Encode(faint.WriteDisplayState), faintCopy.ReadDisplayState);
+            ScreenCell[] faintLine = faintCopy.GetLine(0);
+            Require(!faintLine[0].Style.Dim && faintLine[1].Style.Dim && !faintLine[1].Style.Inverse && faintLine[2].Style.Dim && faintLine[2].Style.Inverse &&
+                !faintLine[3].Style.Dim && faintLine[3].Style.Inverse && !faintLine[4].Style.Dim && !faintLine[4].Style.Inverse,
+                "Display state snapshot lost faint or inverse cells");
             Console.WriteLine("PASS: compressed snapshots preserve styled buffers, Unicode cells, cursor and app modes");
         }
         private static void OwnerExit(string host, string probe, string executable, string directory)

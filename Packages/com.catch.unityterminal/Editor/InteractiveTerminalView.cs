@@ -256,6 +256,7 @@ namespace UnityTerminal
                     int foreground = cell.Style.Foreground < 0 ? 0xd4d4d4 : cell.Style.Foreground;
                     int background = cell.Style.Background < 0 ? 0x1e1e1e : cell.Style.Background;
                     if (cell.Style.Inverse) { int swap = foreground; foreground = background; background = swap; }
+                    if (cell.Style.Dim) foreground = Halfway(foreground, background);   // faint: placeholders, suggestions
                     if (selected) { foreground = 0xffffff; background = 0x264f78; }
                     var area = new Rect(4 + x * cellWidth, 2 + y * cellHeight, count * cellWidth, cellHeight);
                     if (background != 0x1e1e1e) EditorGUI.DrawRect(area, Rgb(background));
@@ -525,7 +526,7 @@ namespace UnityTerminal
             if (scrollBack != 0 || screen.CursorVisible == false || composing || Input.compositionString.Length > 0) return;
             int row = cell / screen.Columns, column = cell % screen.Columns;
             if (row != screen.CursorY) return;
-            string keys = TerminalInput.CursorMoveKeys(screen.GetLine(row), screen.CursorX, column, screen.ApplicationCursor, row == trailing.Row ? TerminalInput.TextEnd(screen.GetLine(row)) + trailing.Count : -1);
+            string keys = TerminalInput.CursorMoveKeys(screen.GetLine(row), screen.CursorX, column, screen.ApplicationCursor, row == trailing.Row ? TerminalInput.TextEnd(screen.GetLine(row), screen.CursorX) + trailing.Count : -1);
             if (keys.Length > 0) SendText(keys);
         }
 
@@ -649,6 +650,10 @@ namespace UnityTerminal
             if (Send != null) Send(TerminalInput.Paste(GUIUtility.systemCopyBuffer, screen.BracketedPaste));
         }
         public void ShowError(string error) { status = error; }
+        private static int Halfway(int a, int b)
+        {
+            return ((((a >> 16) & 255) + ((b >> 16) & 255)) / 2 << 16) | ((((a >> 8) & 255) + ((b >> 8) & 255)) / 2 << 8) | (((a & 255) + (b & 255)) / 2);
+        }
         private static Color Rgb(int color) { return new Color(((color >> 16) & 255) / 255f, ((color >> 8) & 255) / 255f, (color & 255) / 255f); }
     }
 }

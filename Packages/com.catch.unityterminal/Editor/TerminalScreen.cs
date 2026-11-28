@@ -14,11 +14,12 @@ namespace UnityTerminal
     {
         public int Foreground, Background;
         public bool Bold, Italic, Underline, Inverse;
+        public bool Dim; // SGR 2 (faint): apps draw placeholders and inline suggestions this way.
         public static ScreenStyle Default { get { return new ScreenStyle { Foreground = -1, Background = -1 }; } }
         public bool Equals(ScreenStyle other)
         {
             return Foreground == other.Foreground && Background == other.Background && Bold == other.Bold &&
-                Italic == other.Italic && Underline == other.Underline && Inverse == other.Inverse;
+                Italic == other.Italic && Underline == other.Underline && Inverse == other.Inverse && Dim == other.Dim;
         }
     }
 
@@ -367,10 +368,11 @@ namespace UnityTerminal
                 int code = p[i];
                 if (code == 0) style = ScreenStyle.Default;
                 else if (code == 1) style.Bold = true;
+                else if (code == 2) style.Dim = true;
                 else if (code == 3) style.Italic = true;
                 else if (code == 4) style.Underline = true;
                 else if (code == 7) style.Inverse = true;
-                else if (code == 22) style.Bold = false;
+                else if (code == 22) { style.Bold = false; style.Dim = false; }
                 else if (code == 23) style.Italic = false;
                 else if (code == 24) style.Underline = false;
                 else if (code == 27) style.Inverse = false;
@@ -469,7 +471,9 @@ namespace UnityTerminal
                 while (x + count < line.Length && cell.Width == line[x + count].Width && cell.Text == line[x + count].Text && cell.Style.Equals(line[x + count].Style)) count++;
                 writer.Write(count); writer.Write(cell.Text ?? " "); writer.Write(cell.Width);
                 writer.Write(cell.Style.Foreground); writer.Write(cell.Style.Background);
-                writer.Write(cell.Style.Bold); writer.Write(cell.Style.Italic); writer.Write(cell.Style.Underline); writer.Write(cell.Style.Inverse);
+                writer.Write(cell.Style.Bold); writer.Write(cell.Style.Italic); writer.Write(cell.Style.Underline);
+                // Inverse and Dim share the last byte (bit 0, bit 1); a host that predates Dim writes 0/1 there.
+                writer.Write((byte)((cell.Style.Inverse ? 1 : 0) | (cell.Style.Dim ? 2 : 0)));
                 x += count;
             }
         }
@@ -503,7 +507,9 @@ namespace UnityTerminal
                 if (count < 1 || count > length - x) throw new InvalidDataException("Invalid terminal cell run.");
                 var cell = new ScreenCell { Text = reader.ReadString(), Width = reader.ReadInt32(), Style = new ScreenStyle {
                     Foreground = reader.ReadInt32(), Background = reader.ReadInt32(), Bold = reader.ReadBoolean(), Italic = reader.ReadBoolean(),
-                    Underline = reader.ReadBoolean(), Inverse = reader.ReadBoolean() } };
+                    Underline = reader.ReadBoolean() } };
+                byte flags = reader.ReadByte();
+                cell.Style.Inverse = (flags & 1) != 0; cell.Style.Dim = (flags & 2) != 0;
                 if (cell.Width < 0 || cell.Width > 2) throw new InvalidDataException("Invalid glyph width.");
                 for (int i = 0; i < count; i++) line[x++] = cell;
             }
